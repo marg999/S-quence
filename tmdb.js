@@ -120,14 +120,65 @@
     else if (/Q25235$/.test(v.unit)) n = n * 60;  // heures
     return Math.round(n);
   }
+  function commons(f) { return 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=342'; }
   function filmPoster(ent) {
     var f = claimValues(ent, 'P3383')[0] || claimValues(ent, 'P18')[0];
-    return f ? 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=342' : null;
+    return f ? commons(f) : null;
   }
   function getEntities(ids, props) {
     if (!ids.length) return Promise.resolve({});
-    return getJSON(wdURL({ action: 'wbgetentities', ids: ids.slice(0, 50).join('|'), props: props, languages: 'fr|en' }))
-      .then(function (d) { return d.entities || {}; });
+    var params = { action: 'wbgetentities', ids: ids.slice(0, 50).join('|'), props: props, languages: 'fr|en' };
+    if (props.indexOf('sitelinks') !== -1) params.sitefilter = 'enwiki|frwiki';
+    return getJSON(wdURL(params)).then(function (d) { return d.entities || {}; });
+  }
+
+  /* Affiche de l'article Wikipédia du film (anglais d'abord, puis français) */
+  function pageImages(lang, titles) {
+    if (!titles.length) return Promise.resolve({});
+    var u = new URL('https://' + lang + '.wikipedia.org/w/api.php');
+    var params = { action: 'query', prop: 'pageimages', piprop: 'thumbnail', pithumbsize: '342', pilicense: 'any',
+      redirects: '1', titles: titles.slice(0, 50).join('|'), format: 'json', origin: '*' };
+    Object.keys(params).forEach(function (k) { u.searchParams.set(k, params[k]); });
+    return getJSON(u.toString()).then(function (d) {
+      var q = d.query || {}, alias = {}, out = {};
+      (q.normalized || []).concat(q.redirects || []).forEach(function (x) { alias[x.from] = x.to; });
+      var byTitle = {};
+      Object.keys(q.pages || {}).forEach(function (k) {
+        var p = q.pages[k];
+        if (p.thumbnail && p.thumbnail.source) byTitle[p.title] = p.thumbnail.source;
+      });
+      titles.forEach(function (t) {
+        var final = t, guard = 0;
+        while (alias[final] && guard++ < 3) final = alias[final];
+        if (byTitle[final]) out[t] = byTitle[final];
+      });
+      return out;
+    }).catch(function () { return {}; });
+  }
+  // Renvoie { Qid: url } ; ordre de préférence : affiche Wikidata, Wikipédia anglais, Wikipédia français, image Wikidata
+  function filmPosters(ents) {
+    var result = {}, en = [], fr = [];
+    ents.forEach(function (ent) {
+      var poster = claimValues(ent, 'P3383')[0];
+      if (poster) { result[ent.id] = commons(poster); return; }
+      var sl = ent.sitelinks || {};
+      if (sl.enwiki) en.push(ent);
+      else if (sl.frwiki) fr.push(ent);
+    });
+    return pageImages('en', en.map(function (e) { return e.sitelinks.enwiki.title; })).then(function (found) {
+      en.forEach(function (ent) {
+        var url = found[ent.sitelinks.enwiki.title];
+        if (url) result[ent.id] = url;
+        else if (ent.sitelinks.frwiki) fr.push(ent);
+      });
+      return pageImages('fr', fr.map(function (e) { return e.sitelinks.frwiki.title; }));
+    }).then(function (found) {
+      fr.forEach(function (ent) { var url = found[ent.sitelinks.frwiki.title]; if (url) result[ent.id] = url; });
+      ents.forEach(function (ent) {
+        if (!result[ent.id]) { var img = claimValues(ent, 'P18')[0]; if (img) result[ent.id] = commons(img); }
+      });
+      return result;
+    });
   }
   function cleanGenre(s) {
     var g = String(s || '').replace(/^film\s+/i, '').replace(/^de\s+(?=[a-z])/i, '').trim();
@@ -152,31 +203,36 @@
         var ids = [];
         (res[0] || []).concat(res[1] || []).forEach(function (id) { if (/^Q\d+$/.test(id) && ids.indexOf(id) === -1) ids.push(id); });
         if (!ids.length) return [];
-        return getEntities(ids, 'labels|descriptions|claims').then(function (ents) {
-          return ids.map(function (id) { return ents[id]; })
+        return getEntities(ids, 'labels|descriptions|claims|sitelinks').then(function (ents) {
+          var films = ids.map(function (id) { return ents[id]; })
             .filter(function (ent) { return ent && !ent.missing && isFilm(ent); })
-            .slice(0, 10)
-            .map(function (ent) {
+            .slice(0, 10);
+          return filmPosters(films).then(function (posters) {
+            return films.map(function (ent) {
               var desc = ent.descriptions ? (ent.descriptions.fr || ent.descriptions.en) : null;
               return { tmdb_id: parseInt(ent.id.slice(1), 10), media_type: 'movie', title: label(ent),
-                year: filmYear(ent), poster_path: filmPoster(ent), overview: desc ? desc.value : '' };
+                year: filmYear(ent), poster_path: posters[ent.id] || null, overview: desc ? desc.value : '' };
             });
+          });
         });
       });
     },
     details: function (id) {
       var qid = 'Q' + id;
-      return getEntities([qid], 'labels|descriptions|claims').then(function (ents) {
+      return getEntities([qid], 'labels|descriptions|claims|sitelinks').then(function (ents) {
         var ent = ents[qid];
         if (!ent || ent.missing) throw new Error('Film introuvable sur Wikidata.');
         var dirIds = claimValues(ent, 'P57').map(function (v) { return v.id; }).filter(Boolean).slice(0, 4);
         var genreIds = claimValues(ent, 'P136').map(function (v) { return v.id; }).filter(Boolean).slice(0, 6);
-        return getEntities(dirIds.concat(genreIds), 'labels').catch(function () { return {}; }).then(function (more) {
+        var labels = getEntities(dirIds.concat(genreIds), 'labels').catch(function () { return {}; });
+        var posters = filmPosters([ent]).catch(function () { return {}; });
+        return Promise.all([labels, posters]).then(function (res) {
+          var more = res[0], posterUrl = res[1][qid] || null;
           var desc = ent.descriptions ? (ent.descriptions.fr || ent.descriptions.en) : null;
           var genres = [];
           genreIds.forEach(function (g) { var c = cleanGenre(label(more[g])); if (c && genres.indexOf(c) === -1) genres.push(c); });
           return {
-            tmdb_id: id, media_type: 'movie', title: label(ent), year: filmYear(ent), poster_path: filmPoster(ent),
+            tmdb_id: id, media_type: 'movie', title: label(ent), year: filmYear(ent), poster_path: posterUrl,
             overview: desc ? desc.value.charAt(0).toUpperCase() + desc.value.slice(1) + '.' : '',
             runtime: filmRuntime(ent), ep_runtime: null, genres: genres,
             director: dirIds.map(function (d) { return label(more[d]); }).filter(Boolean).join(', '),
@@ -307,7 +363,7 @@
 
     img: function (path, size) {
       if (!path) return null;
-      if (/^https?:\/\//.test(path)) return path;
+      if (/^(https?:\/\/|data:image\/)/.test(path)) return path;
       return token ? TMDB_IMG + (size || 'w342') + path : null;
     },
 

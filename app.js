@@ -135,7 +135,7 @@
   function refreshFromDetail(e, d) {
     if (!d) return e;
     if (d.seasons && d.seasons.length) e.seasons = d.seasons.slice();
-    if (d.poster_path) e.poster_path = d.poster_path;
+    if (d.poster_path && !e.poster_path) e.poster_path = d.poster_path; // ne remplace jamais une affiche choisie
     if (d.runtime) e.runtime = d.runtime;
     if (d.ep_runtime) e.ep_runtime = d.ep_runtime;
     if (d.genres && d.genres.length) e.genres = d.genres.slice();
@@ -501,7 +501,9 @@
         TMDB.recommend(d).then(function (list) { d.recommendations = list || []; render(); });
       }
       var e = findEntry(type, id);
-      if (e && type === 'tv' && d.seasons.length && JSON.stringify(e.seasons) !== JSON.stringify(d.seasons)) {
+      var seasonsChanged = e && type === 'tv' && d.seasons.length && JSON.stringify(e.seasons) !== JSON.stringify(d.seasons);
+      var posterMissing = e && !e.poster_path && d.poster_path;
+      if (seasonsChanged || posterMissing) {
         refreshFromDetail(e, d);
         persist(e).then(render).catch(function () {});
       }
@@ -531,7 +533,8 @@
     var meta = [isTv ? 'Série' : 'Film', info.year, (info.genres || []).slice(0, 2).join(', '),
       isTv ? plural((info.seasons || []).length, 'saison', 'saisons') : fmtDur(info.runtime)].filter(Boolean).join(' · ');
 
-    var side = '<aside class="fiche__side">' + poster(info) + '<div class="side-actions">' +
+    var shown = Object.assign({}, info, { poster_path: (e && e.poster_path) || info.poster_path });
+    var side = '<aside class="fiche__side">' + poster(shown) + '<div class="side-actions">' +
       '<button type="button" class="btn btn--accent" data-act="seen-this" data-type="' + type + '" data-id="' + esc(id) + '">' + (isTv ? 'J\'ai vu des épisodes' : 'J\'ai vu ce film') + '</button>';
     if (!e) side += '<button type="button" class="btn" data-act="add-towatch" data-type="' + type + '" data-id="' + esc(id) + '">+ À voir</button>';
     else if (!act) side += '<span class="tag" style="align-self:flex-start;border:2px solid var(--line)">Dans ta liste À voir</span>' + confirmBtn('entry:' + e.id, 'Retirer de À voir');
@@ -539,6 +542,7 @@
       side += '<button type="button" class="btn" data-act="abandon" data-id="' + esc(e.id) + '">' + (e.status === 'abandonne' ? 'Reprendre la série' : 'J\'abandonne') + '</button>';
     }
     if (manual && e) side += '<button type="button" class="btn" data-act="edit-manual" data-id="' + esc(e.id) + '">Modifier les infos</button>';
+    if (e) side += '<button type="button" class="linkish" data-act="edit-poster" data-id="' + esc(e.id) + '">' + (e.poster_path ? 'Changer l\'affiche' : 'Ajouter une affiche') + '</button>';
     side += '</div></aside>';
 
     var main = '<div class="section"><span class="label">' + esc(meta) + (e ? ' · ' + esc(STATUS_LABEL[e.status]) : '') + (manual ? ' · Ajouté à la main' : '') + '</span>' +
@@ -752,6 +756,55 @@
     return '<a class="link" href="' + esc(url) + '" target="_blank" rel="noopener">Chercher « ' + esc(q) + ' » sur Google ↗</a>';
   }
 
+  /* ---------- Affiche choisie par l'utilisateur ---------- */
+  function posterModalHTML() {
+    var m = state.modal, e = findById(m.entryId);
+    if (!e) return '';
+    var gi = 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(e.title + (e.year ? ' ' + e.year : '') + (e.media_type === 'tv' ? ' série affiche' : ' affiche'));
+    var body = '<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start">' +
+      '<div style="width:150px;flex:0 0 150px">' + poster({ title: e.title, poster_path: m.preview }) + '</div>' +
+      '<div style="flex:1 1 240px;min-width:0;display:flex;flex-direction:column;gap:16px">' +
+      '<div class="field"><label class="label" for="pf-file">Une image de ton appareil</label>' +
+      '<input id="pf-file" type="file" accept="image/*" data-change="pf-file" style="padding:10px;min-height:0"></div>' +
+      '<form class="field" data-form="poster-url"><label class="label" for="pf-url">Ou l\'adresse d\'une image</label>' +
+      '<span style="display:flex;flex-wrap:wrap;gap:8px"><input id="pf-url" type="url" placeholder="https://…" style="flex:1 1 180px;min-width:0">' +
+      '<button type="submit" class="btn btn--small">Voir</button></span></form>' +
+      '<span style="font-size:14px">Astuce : sur <a class="link" href="' + esc(gi) + '" target="_blank" rel="noopener">Google Images ↗</a>, clic droit (ou appui long) sur une affiche, puis « Copier l\'adresse de l\'image ».</span>' +
+      (m.busy ? '<p class="label" style="margin:0">Préparation de l\'image…</p>' : '') +
+      (m.err ? '<p class="msg msg--err" role="alert" style="margin:0">' + esc(m.err) + '</p>' : '') +
+      '</div></div>';
+    var foot = (m.preview ? '<button type="button" class="btn" data-act="pf-remove">Sans affiche</button>' : '') +
+      '<button type="button" class="btn" data-act="close-modal">Annuler</button>' +
+      '<button type="button" class="btn btn--accent" data-act="pf-save"' + (m.busy ? ' disabled' : '') + '>Enregistrer</button>';
+    return '<div class="overlay" data-act="overlay"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="m-title">' +
+      '<div class="dialog__head"><span class="display" id="m-title">.Affiche</span>' +
+      '<button type="button" class="icon-btn" data-act="close-modal" aria-label="Fermer">' + ICON.close + '</button></div>' +
+      '<div class="dialog__body">' + body + '</div><div class="dialog__foot">' + foot + '</div></div></div>';
+  }
+
+  // Réduit l'image à 342 px de large (JPEG) pour qu'elle reste légère dans la base
+  function resizeImage(file) {
+    return new Promise(function (resolve, reject) {
+      if (!file || !/^image\//.test(file.type)) { reject(new Error('Choisis un fichier image (JPG, PNG, WebP…).')); return; }
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error('Impossible de lire ce fichier.')); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error('Ce fichier n\'est pas une image lisible.')); };
+        img.onload = function () {
+          var w = Math.min(342, img.naturalWidth || 342);
+          var h = Math.round(w * (img.naturalHeight || 513) / (img.naturalWidth || 342));
+          var c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          c.getContext('2d').drawImage(img, 0, 0, w, h);
+          resolve(c.toDataURL('image/jpeg', 0.82));
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
   function manualHTML() {
     var m = state.modal, mm = m.manual, isTv = mm.type === 'tv';
     function field(k, label, type, extra) {
@@ -791,6 +844,7 @@
 
   function viewModal() {
     var m = state.modal;
+    if (m.mode === 'poster') return posterModalHTML();
     var title = m.mode === 'edit' ? 'Modifier les infos' : m.step === 'manual' ? 'Ajout à la main' : m.mode === 'search' ? 'Rechercher' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'J\'ai vu…';
     var body = '', foot = '';
     if (m.step === 'manual') {
@@ -1085,6 +1139,17 @@
       var t = document.getElementById(m.manual.title ? 'mf-year' : 'mf-title'); if (t) t.focus();
     },
     'mf-type': function (t) { state.modal.manual.type = t.dataset.v; render(); },
+    'edit-poster': function (t) {
+      var e = findById(t.dataset.id); if (!e) return;
+      state.modal = { mode: 'poster', step: 'poster', entryId: e.id, preview: e.poster_path || null, err: '', busy: false, focus: false };
+      render();
+    },
+    'pf-remove': function () { state.modal.preview = null; state.modal.err = ''; render(); },
+    'pf-save': function () {
+      var m = state.modal, e = findById(m.entryId); if (!e) { closeModal(); return; }
+      e.poster_path = m.preview || null;
+      persist(e).then(function () { state.modal = null; toast(e.poster_path ? 'Affiche enregistrée' : 'Affiche retirée'); render(); }).catch(function () {});
+    },
     'edit-manual': function (t) {
       var e = findById(t.dataset.id); if (!e) return;
       state.modal = {
@@ -1115,6 +1180,15 @@
       var cands = state.entries.filter(function (e) { return e.media_type === 'movie' && e.status === 'a_voir' && e.runtime && e.runtime <= min; });
       state.ui.tonight = cands.length ? { id: cands[Math.floor(Math.random() * cands.length)].id } : { none: true, min: min };
       render();
+    },
+    'poster-url': function (f) {
+      var m = state.modal;
+      var url = f.querySelector('#pf-url').value.trim();
+      if (!/^https:\/\/\S+$/.test(url)) { m.err = 'Colle une adresse qui commence par https://'; render(); return; }
+      var img = new Image();
+      img.onload = function () { if (state.modal !== m) return; m.preview = url; m.err = ''; render(); };
+      img.onerror = function () { if (state.modal !== m) return; m.err = 'Cette adresse ne mène pas à une image. Essaie « Copier l\'adresse de l\'image » plutôt que l\'adresse de la page.'; render(); };
+      img.src = url;
     },
     manual: function () {
       var m = state.modal, mm = m.manual, isTv = mm.type === 'tv';
@@ -1213,6 +1287,18 @@
       var r = state.route, e = findEntry(r.type, r.id); if (!e) return;
       e.per_season = t.checked; render();
       persist(e).catch(function () {});
+    },
+    'pf-file': function (t) {
+      var m = state.modal; if (!m) return;
+      var file = t.files && t.files[0]; if (!file) return;
+      m.busy = true; m.err = ''; render();
+      resizeImage(file).then(function (data) {
+        if (state.modal !== m) return;
+        m.preview = data; m.busy = false; render();
+      }).catch(function (err) {
+        if (state.modal !== m) return;
+        m.busy = false; m.err = err.message; render();
+      });
     },
     'stats-year': function (t) { state.ui.statsYear = parseInt(t.value, 10); render(); },
     'm-season': function (t) { var f = state.modal.form; f.season = parseInt(t.value, 10); f.ep = 1; render(); },
