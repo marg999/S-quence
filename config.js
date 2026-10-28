@@ -18,4 +18,5 @@ window.SEQUENCE_CONFIG = {
   SUPABASE_URL: 'https://tahxrwvbeoupwkgpnvdw.supabase.co',
   SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRhaHhyd3ZiZW91cHdrZ3BudmR3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMxOTM1NDcsImV4cCI6MjEwODc2OTU0N30.cDKq1oFVLRgKOCwJcafdPaiI2PGTKR2cfND9PsBI878',
   TMDB_TOKEN: ''
+     , PARAGRAPHE_URL: 'https://marg999.github.io/Paragraphe/'
 };
