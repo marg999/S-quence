@@ -213,8 +213,7 @@
   function footer() {
     return '<footer class="foot"><div class="wrap">' +
       '<span>.SÉQUENCE — ton journal privé de films et de séries</span>' +
-      '<span>Données et images : <a href="https://www.themoviedb.org" target="_blank" rel="noopener">TMDB</a>. ' +
-      'This product uses the TMDB API but is not endorsed or certified by TMDB.</span>' +
+      '<span>' + TMDB.creditHTML() + '</span>' +
       '</div></footer>';
   }
 
@@ -498,6 +497,9 @@
     state.detailLoading[k] = true;
     TMDB.details(type, id).then(function (d) {
       state.details[k] = d;
+      if (!d.recommendations) {
+        TMDB.recommend(d).then(function (list) { d.recommendations = list || []; render(); });
+      }
       var e = findEntry(type, id);
       if (e && type === 'tv' && d.seasons.length && JSON.stringify(e.seasons) !== JSON.stringify(d.seasons)) {
         refreshFromDetail(e, d);
@@ -514,11 +516,12 @@
     var k = key(type, id);
     var d = state.details[k];
     var e = findEntry(type, id);
-    if (!d && !state.detailErr[k]) loadDetail(type, id);
+    var manual = isManualId(id);
+    if (!manual && !d && !state.detailErr[k]) loadDetail(type, id);
     var info = d || e;
     if (!info) {
-      if (state.detailErr[k]) {
-        return '<div class="empty"><span class="h2 display">.Titre introuvable</span><p style="margin:0">' + esc(state.detailErr[k]) + '</p>' +
+      if (state.detailErr[k] || manual) {
+        return '<div class="empty"><span class="h2 display">.Titre introuvable</span><p style="margin:0">' + esc(state.detailErr[k] || 'Ce titre n\'est plus dans ton journal.') + '</p>' +
           '<a class="btn" href="#journal">Retour au journal</a></div>';
       }
       return '<div class="loading">Chargement…</div>';
@@ -535,12 +538,14 @@
     if (isTv && e && act && e.status !== 'vu') {
       side += '<button type="button" class="btn" data-act="abandon" data-id="' + esc(e.id) + '">' + (e.status === 'abandonne' ? 'Reprendre la série' : 'J\'abandonne') + '</button>';
     }
+    if (manual && e) side += '<button type="button" class="btn" data-act="edit-manual" data-id="' + esc(e.id) + '">Modifier les infos</button>';
     side += '</div></aside>';
 
-    var main = '<div class="section"><span class="label">' + esc(meta) + (e ? ' · ' + esc(STATUS_LABEL[e.status]) : '') + '</span>' +
+    var main = '<div class="section"><span class="label">' + esc(meta) + (e ? ' · ' + esc(STATUS_LABEL[e.status]) : '') + (manual ? ' · Ajouté à la main' : '') + '</span>' +
       '<h1 class="fiche__title display">.' + esc(info.title) + '</h1>' +
       (info.director ? '<span>' + (isTv ? 'Créée par ' : 'Réalisé par ') + '<b>' + esc(info.director) + '</b></span>' : '') +
-      (d && d.overview ? '<p class="overview">' + esc(d.overview) + '</p>' : '') + '</div>';
+      (d && d.overview ? '<p class="overview">' + esc(d.overview) + '</p>' : '') +
+      '<span>' + googleLink(info.title + (info.year ? ' ' + info.year : ''), type) + '</span></div>';
 
     if (e && act) {
       if (!isTv) {
@@ -623,12 +628,31 @@
         }).join('') + '</ul></section>';
     }
 
-    if (d && d.recommendations && d.recommendations.length) {
-      main += '<section class="section"><h2 class="h2 display">.Si tu as aimé</h2><div class="recos">' + d.recommendations.map(function (r) {
-        var mine = findEntry(r.media_type, r.tmdb_id);
-        return '<a class="reco" href="#fiche-' + r.media_type + '-' + r.tmdb_id + '"><span class="display">' + esc(r.title) + '</span><span style="font-size:13px">' +
-          esc([r.year, mine ? (hasActivity(mine) ? 'déjà vu' : 'dans ta liste') : ''].filter(Boolean).join(' · ')) + '</span></a>';
-      }).join('') + '</div></section>';
+    var recoLoading = !!(d && d.recommendations === null);
+    var recos = ((d && d.recommendations) || []).slice(0, 6);
+    // Compléter avec les titres de la liste À voir qui partagent un genre
+    var myGenres = info.genres || [];
+    if (recos.length < 6 && myGenres.length) {
+      state.entries.filter(function (x) {
+        return x.status === 'a_voir' && !(x.media_type === type && String(x.tmdb_id) === String(id)) &&
+          x.genres.some(function (g) { return myGenres.indexOf(g) !== -1; }) &&
+          !recos.some(function (r) { return r.media_type === x.media_type && String(r.tmdb_id) === String(x.tmdb_id); });
+      }).slice(0, 6 - recos.length).forEach(function (x) {
+        var common = x.genres.filter(function (g) { return myGenres.indexOf(g) !== -1; })[0];
+        recos.push({ tmdb_id: x.tmdb_id, media_type: x.media_type, title: x.title, year: x.year, reason: 'Dans ta liste · ' + common });
+      });
+    }
+    if (recos.length || recoLoading) {
+      main += '<section class="section"><h2 class="h2 display">.Si tu as aimé</h2>' +
+        (recoLoading ? '<p class="label muted" style="margin:0">Recherche de titres proches…</p>' : '') +
+        (recos.length ? '<div class="recos">' + recos.map(function (r) {
+          var mine = findEntry(r.media_type, r.tmdb_id);
+          var status = mine ? (hasActivity(mine) ? 'déjà vu' : 'dans ta liste') : '';
+          return '<a class="reco" href="#fiche-' + r.media_type + '-' + r.tmdb_id + '">' +
+            (r.reason ? '<span class="label">' + esc(r.reason) + '</span>' : '') +
+            '<span class="display">' + esc(r.title) + '</span><span style="font-size:13px">' +
+            esc([r.media_type === 'tv' ? 'Série' : 'Film', r.year, r.reason && r.reason.indexOf('Dans ta liste') === 0 ? '' : status].filter(Boolean).join(' · ')) + '</span></a>';
+        }).join('') + '</div>' : '') + '</section>';
     }
 
     if (e && act) {
@@ -641,33 +665,48 @@
 
   /* ---------- Fenêtre d'ajout / recherche ---------- */
   function openModal(mode, preset) {
-    state.modal = { mode: mode, step: 'search', q: '', results: [], loading: false, err: '', detail: null, form: null, focus: true };
+    state.modal = { mode: mode, step: 'search', q: '', results: [], loading: false, err: '', detail: null, form: null, manual: null, focus: true };
     render();
     if (preset) pick(preset.type, preset.id);
   }
   function closeModal() { state.modal = null; render(); }
 
+  /* Titres ajoutés à la main : identifiant négatif, jamais utilisé par TMDB */
+  function isManualId(id) { return Number(id) < 0; }
+  function newManualId() { return -(Math.floor(Math.random() * 2000000000) + 1); }
+
+  function startForm(m, d) {
+    var e = findEntry(d.media_type, d.tmdb_id);
+    var ss = (d.seasons || []).slice().sort(function (a, b) { return a.n - b.n; });
+    var n = e ? nextEp(refreshFromDetail(e, d)) : (ss.length ? { s: ss[0].n, e: 1 } : null);
+    m.detail = d;
+    m.loading = false;
+    m.step = 'form';
+    m.err = '';
+    m.form = {
+      when: 'today', date: todayISO(), lieu: 'Streaming', version: 'VO', avec: '',
+      note: e && e.notes.gen ? e.notes.gen : 0, rewatch: !!(e && e.viewings.length),
+      season: n ? n.s : (ss[0] ? ss[0].n : 1), ep: n ? n.e : 1
+    };
+    render();
+  }
+
   function pick(type, id) {
     var m = state.modal;
     if (!m) return;
     if (m.mode === 'search') { state.modal = null; go('fiche-' + type + '-' + id); return; }
+    if (isManualId(id)) {
+      var me = findEntry(type, id);
+      if (me) startForm(m, Object.assign({ overview: '', recommendations: [] }, me));
+      return;
+    }
     m.loading = true;
     m.step = 'form';
     render();
     TMDB.details(type, id).then(function (d) {
       if (state.modal !== m) return;
       state.details[key(type, id)] = d;
-      var e = findEntry(type, id);
-      var ss = (d.seasons || []).slice().sort(function (a, b) { return a.n - b.n; });
-      var n = e ? nextEp(refreshFromDetail(e, d)) : (ss.length ? { s: ss[0].n, e: 1 } : null);
-      m.detail = d;
-      m.loading = false;
-      m.form = {
-        when: 'today', date: todayISO(), lieu: 'Streaming', version: 'VO', avec: '',
-        note: e && e.notes.gen ? e.notes.gen : 0, rewatch: !!(e && e.viewings.length),
-        season: n ? n.s : (ss[0] ? ss[0].n : 1), ep: n ? n.e : 1
-      };
-      render();
+      startForm(m, d);
     }).catch(function (err) {
       if (state.modal !== m) return;
       m.loading = false;
@@ -679,19 +718,67 @@
 
   function resultsHTML() {
     var m = state.modal;
+    var g = googleLink(m.q);
+    var manualBtn = '<span style="display:flex;flex-wrap:wrap;gap:4px 20px;align-items:center">' +
+      '<button type="button" class="linkish" data-act="m-manual">Il n\'est pas dans la liste ? Ajoute-le à la main</button>' + g + '</span>';
+    var demoNote = '';
     if (m.loading) return '<p class="label">Recherche…</p>';
-    if (m.err) return '<p class="msg msg--err">' + esc(m.err) + '</p>';
+    if (m.err) return '<p class="msg msg--err">' + esc(m.err) + '</p>' + manualBtn;
     if (!m.q.trim()) {
-      return '<p class="muted" style="margin:0">' + (TMDB.enabled ? 'Tape le titre d\'un film ou d\'une série.'
-        : 'Catalogue de démo : essaie « Dune », « Severance », « Haine » ou « Villeneuve ».') + '</p>';
+      return '<div style="display:flex;flex-direction:column;gap:12px">' +
+        '<p class="muted" style="margin:0">' + esc(TMDB.hint()) + '</p>' + manualBtn + '</div>';
     }
-    if (!m.results.length) return '<p style="margin:0">Aucun résultat pour « ' + esc(m.q) + ' ».</p>';
-    return '<ul class="results">' + m.results.map(function (r) {
+    var q = m.q.trim().toLowerCase();
+    var local = state.entries.filter(function (e) { return isManualId(e.tmdb_id) && e.title.toLowerCase().indexOf(q) !== -1; })
+      .map(function (e) { return { tmdb_id: e.tmdb_id, media_type: e.media_type, title: e.title, year: e.year, poster_path: null }; });
+    var all = local.concat(m.results);
+    if (!all.length) {
+      return '<div style="display:flex;flex-direction:column;gap:12px">' + demoNote + '<p style="margin:0">Aucun résultat pour « ' + esc(m.q) + ' ».</p>' +
+        '<span style="display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center"><button type="button" class="btn btn--ink" data-act="m-manual">Ajouter « ' + esc(m.q.trim()) + ' » à la main</button>' + g + '</span></div>';
+    }
+    return demoNote + '<ul class="results" style="margin-top:' + (demoNote ? '12px' : '0') + '">' + all.map(function (r) {
       var mine = findEntry(r.media_type, r.tmdb_id);
       return '<li><button type="button" class="result" data-act="m-pick" data-type="' + r.media_type + '" data-id="' + r.tmdb_id + '">' + poster(r, { thumb: true }) +
         '<span style="display:flex;flex-direction:column;gap:4px;min-width:0"><span class="result__title">' + esc(r.title) + '</span>' +
-        '<span class="label">' + (r.media_type === 'tv' ? 'Série' : 'Film') + (r.year ? ' · ' + r.year : '') + (mine ? ' · ' + (hasActivity(mine) ? 'déjà vu' : 'dans ta liste') : '') + '</span></span></button></li>';
-    }).join('') + '</ul>';
+        '<span class="label">' + (r.media_type === 'tv' ? 'Série' : 'Film') + (r.year ? ' · ' + r.year : '') + (isManualId(r.tmdb_id) ? ' · ajouté à la main' : '') +
+        (mine ? ' · ' + (hasActivity(mine) ? 'déjà vu' : 'dans ta liste') : '') + '</span></span></button></li>';
+    }).join('') + '</ul><div style="margin-top:12px">' + manualBtn + '</div>';
+  }
+
+  function googleLink(q, kind) {
+    q = String(q || '').trim();
+    if (!q) return '';
+    var url = 'https://www.google.com/search?q=' + encodeURIComponent(q + (kind === 'tv' ? ' série' : kind === 'movie' ? ' film' : ''));
+    return '<a class="link" href="' + esc(url) + '" target="_blank" rel="noopener">Chercher « ' + esc(q) + ' » sur Google ↗</a>';
+  }
+
+  function manualHTML() {
+    var m = state.modal, mm = m.manual, isTv = mm.type === 'tv';
+    function field(k, label, type, extra) {
+      return '<div class="field"><label class="label" for="mf-' + k + '">' + label + '</label>' +
+        '<input id="mf-' + k + '" type="' + (type || 'text') + '" data-input="mf" data-k="' + k + '" value="' + esc(mm[k]) + '"' + (extra || '') + '></div>';
+    }
+    var h = '<form data-form="manual" novalidate style="display:flex;flex-direction:column;gap:16px">';
+    if (m.mode !== 'edit') {
+      h += '<div class="field"><span class="label" id="lbl-mf-type">Type</span><div class="chips" role="group" aria-labelledby="lbl-mf-type">' +
+        '<button type="button" class="chip" data-act="mf-type" data-v="movie" aria-pressed="' + !isTv + '">Film</button>' +
+        '<button type="button" class="chip" data-act="mf-type" data-v="tv" aria-pressed="' + isTv + '">Série</button></div></div>';
+    }
+    h += field('title', 'Titre', 'text', ' maxlength="200" required');
+    h += '<div style="display:flex;flex-wrap:wrap;gap:12px"><div style="flex:1 1 140px">' + field('year', 'Année de sortie', 'number', ' min="1880" max="2100"') + '</div>' +
+      '<div style="flex:1 1 180px">' + field('runtime', isTv ? 'Durée d\'un épisode (min)' : 'Durée (min)', 'number', ' min="1" max="999"') + '</div></div>';
+    if (isTv) {
+      h += field('eps', 'Nombre d\'épisodes par saison', 'text', ' placeholder="ex. 8, 10, 10"') +
+        '<span class="muted" style="font-size:14px;margin-top:-8px">Un nombre par saison, séparés par des virgules.</span>';
+    }
+    h += field('director', isTv ? 'Créée par' : 'Réalisé par', 'text', ' maxlength="200"');
+    h += field('genres', 'Genres', 'text', ' placeholder="ex. Drame, Comédie" maxlength="200"');
+    if (mm.title) h += '<span style="font-size:14px">Un doute sur l\'année ou la durée ? ' + googleLink(mm.title, mm.type) + '</span>';
+    if (m.err) h += '<p class="msg msg--err" role="alert" style="margin:0">' + esc(m.err) + '</p>';
+    h += '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end">' +
+      (m.mode === 'edit' ? '<button type="button" class="btn" data-act="close-modal">Annuler</button>' : '<button type="button" class="btn" data-act="m-back">Retour à la recherche</button>') +
+      '<button type="submit" class="btn btn--accent">' + (m.mode === 'edit' ? 'Enregistrer' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'Continuer') + '</button></div></form>';
+    return h;
   }
 
   function chipGroup(field, options, cur, labelText) {
@@ -704,9 +791,11 @@
 
   function viewModal() {
     var m = state.modal;
-    var title = m.mode === 'search' ? 'Rechercher' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'J\'ai vu…';
+    var title = m.mode === 'edit' ? 'Modifier les infos' : m.step === 'manual' ? 'Ajout à la main' : m.mode === 'search' ? 'Rechercher' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'J\'ai vu…';
     var body = '', foot = '';
-    if (m.step === 'search') {
+    if (m.step === 'manual') {
+      body = manualHTML();
+    } else if (m.step === 'search') {
       body = '<div class="field"><label class="label" for="m-q">Titre, réalisateur…</label><input id="m-q" type="search" autocomplete="off" data-input="m-q" value="' + esc(m.q) + '"></div>' +
         '<div id="m-results">' + resultsHTML() + '</div>';
     } else if (m.loading || !m.detail) {
@@ -821,7 +910,7 @@
   function parseRoute() {
     var h = location.hash.replace(/^#/, '');
     try { h = decodeURIComponent(h); } catch (e) { /* lien mal formé */ }
-    var m = h.match(/^fiche-(movie|tv)-(\d+)$/);
+    var m = h.match(/^fiche-(movie|tv)-(-?\d+)$/);
     if (m) return { name: 'fiche', type: m[1], id: m[2] };
     if (['journal', 'videotheque', 'a-voir', 'stats'].indexOf(h) >= 0) return { name: h };
     return { name: 'journal' };
@@ -988,6 +1077,27 @@
       if (findEntry(d.media_type, d.tmdb_id)) { toast('Déjà dans ton journal'); return; }
       persist(newEntry(d)).then(function () { state.modal = null; toast('Ajouté à À voir'); render(); }).catch(function () {});
     },
+    'm-manual': function () {
+      var m = state.modal; if (!m) return;
+      m.step = 'manual'; m.err = '';
+      m.manual = m.manual || { type: 'movie', title: m.q.trim(), year: '', runtime: '', eps: '', director: '', genres: '' };
+      render();
+      var t = document.getElementById(m.manual.title ? 'mf-year' : 'mf-title'); if (t) t.focus();
+    },
+    'mf-type': function (t) { state.modal.manual.type = t.dataset.v; render(); },
+    'edit-manual': function (t) {
+      var e = findById(t.dataset.id); if (!e) return;
+      state.modal = {
+        mode: 'edit', step: 'manual', q: '', results: [], loading: false, err: '', detail: null, form: null, focus: false,
+        manual: {
+          id: e.id, type: e.media_type, title: e.title, year: e.year || '',
+          runtime: (e.media_type === 'tv' ? e.ep_runtime : e.runtime) || '',
+          eps: sortedSeasons(e).map(function (s) { return s.count; }).join(', '),
+          director: e.director || '', genres: e.genres.join(', ')
+        }
+      };
+      render();
+    },
     'auth-mode': function (t) { state.ui.auth = { mode: t.dataset.v, msg: '', err: '', busy: false }; render(); }
   };
 
@@ -1005,6 +1115,40 @@
       var cands = state.entries.filter(function (e) { return e.media_type === 'movie' && e.status === 'a_voir' && e.runtime && e.runtime <= min; });
       state.ui.tonight = cands.length ? { id: cands[Math.floor(Math.random() * cands.length)].id } : { none: true, min: min };
       render();
+    },
+    manual: function () {
+      var m = state.modal, mm = m.manual, isTv = mm.type === 'tv';
+      var title = String(mm.title || '').trim();
+      var year = parseInt(mm.year, 10);
+      var rt = parseInt(mm.runtime, 10);
+      var counts = String(mm.eps || '').split(/[^0-9]+/).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
+      if (!title) { m.err = 'Indique au moins le titre.'; render(); return; }
+      if (mm.year !== '' && (!year || year < 1880 || year > 2100)) { m.err = 'L\'année doit être entre 1880 et 2100.'; render(); return; }
+      if (isTv && !counts.length) { m.err = 'Indique le nombre d\'épisodes de chaque saison, par exemple « 8, 10 ».'; render(); return; }
+      var genres = String(mm.genres || '').split(',').map(function (g) { return g.trim(); }).filter(Boolean).slice(0, 8);
+      var seasons = isTv ? counts.slice(0, 60).map(function (c, i) { return { n: i + 1, count: Math.min(c, 500) }; }) : [];
+      var fields = {
+        title: title, year: year || null, director: String(mm.director || '').trim(), genres: genres,
+        runtime: !isTv && rt > 0 ? rt : null, ep_runtime: isTv ? (rt > 0 ? rt : 45) : null, seasons: seasons
+      };
+      if (m.mode === 'edit') {
+        var e = findById(mm.id); if (!e) { closeModal(); return; }
+        Object.keys(fields).forEach(function (k) { e[k] = fields[k]; });
+        if (isTv) {
+          var valid = {};
+          seasons.forEach(function (s) { for (var i = 1; i <= s.count; i++) valid[s.n + '-' + i] = 1; });
+          Object.keys(e.episodes).forEach(function (k) { if (!valid[k]) delete e.episodes[k]; });
+        }
+        persist(e).then(function () { state.modal = null; toast('Infos mises à jour'); render(); }).catch(function () {});
+        return;
+      }
+      var d = Object.assign({ tmdb_id: newManualId(), media_type: mm.type, poster_path: null, overview: '', recommendations: [] }, fields);
+      if (m.mode === 'towatch') {
+        persist(newEntry(d)).then(function () { state.modal = null; toast('Ajouté à À voir'); render(); }).catch(function () {});
+        return;
+      }
+      m.mode = 'add';
+      startForm(m, d);
     },
     auth: function (f) {
       var a = state.ui.auth;
@@ -1059,7 +1203,8 @@
       }, 350);
     },
     'm-date': function (t) { state.modal.form.date = t.value; },
-    'm-avec': function (t) { state.modal.form.avec = t.value; }
+    'm-avec': function (t) { state.modal.form.avec = t.value; },
+    'mf': function (t) { if (state.modal && state.modal.manual) state.modal.manual[t.dataset.k] = t.value; }
   };
   function updateResults() { var el = document.getElementById('m-results'); if (el) el.innerHTML = resultsHTML(); }
 
