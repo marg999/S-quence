@@ -190,7 +190,15 @@
     if (d.ep_runtime && !e.ep_runtime) { e.ep_runtime = d.ep_runtime; changed = true; }
     if (d.genres && d.genres.length && !e.genres.length) { e.genres = d.genres.slice(); changed = true; }
     if (d.director && !e.director) { e.director = d.director; changed = true; }
-    if (d.saga && !sagaOf(e)) { e.notes = Object.assign({}, e.notes, { _saga: { id: d.saga.id, label: d.saga.label, order: d.saga.order || null } }); changed = true; }
+    // Saga : on suit le catalogue (corrige les anciennes sagas mal détectées, ex. « Pixar » au lieu de « Cars »)
+    if ('saga' in d && !isManualId(e.tmdb_id)) {
+      var cur = sagaOf(e);
+      if (d.saga && (!cur || cur.id !== d.saga.id || cur.label !== d.saga.label || (d.saga.order && cur.order !== d.saga.order))) {
+        e.notes = Object.assign({}, e.notes, { _saga: { id: d.saga.id, label: d.saga.label, order: d.saga.order || null } }); changed = true;
+      } else if (!d.saga && cur) {
+        e.notes = Object.assign({}, e.notes); delete e.notes._saga; changed = true;
+      }
+    }
     return changed;
   }
   function entryFor(type, id) {
@@ -336,10 +344,11 @@
     var hero = '<section class="hero"><div class="hero__title"><span class="eyebrow">' + esc(dateLabel) + '</span>' +
       '<h1 class="h1 display">.Mon<br>journal</h1></div>' + goalHTML + '</section>';
 
+    var helpBlock = '<details class="help"' + (es.length ? '' : ' open') + '><summary><span class="h2 display">.Comment ça marche</span></summary><div>' + howtoHTML() + '</div></details>';
     if (!es.length) {
       return '<div class="stack">' + hero + '<div class="empty"><span class="h2 display">.Ton journal est vide</span>' +
         '<p style="margin:0;max-width:60ch">Commence par le dernier film ou la dernière série que tu as regardés. Tu pourras les noter et suivre tes saisons.</p>' +
-        '<button type="button" class="btn btn--accent" data-act="open-add">J\'ai vu…</button></div></div>';
+        '<button type="button" class="btn btn--accent" data-act="open-add">J\'ai vu…</button></div>' + helpBlock + '</div>';
     }
 
     var enCours = es.filter(function (e) { return e.status === 'en_cours'; })
@@ -387,7 +396,7 @@
       '<form class="tonight" data-form="tonight"><span class="display">Ce soir j\'ai…</span>' +
       '<label for="tonight-min"><input id="tonight-min" type="number" min="20" max="400" step="5" value="' + state.ui.tonightMin + '"> minutes devant moi</label>' +
       '<span><button type="submit" class="btn btn--small">Suggère-moi un film</button></span>' + tonightRes + '</form></section>' +
-      '</div>';
+      helpBlock + '</div>';
   }
 
   /* ---------- Vidéothèque ---------- */
@@ -609,7 +618,18 @@
     TMDB.details(type, id).then(function (d) {
       state.details[k] = d;
       if (!d.recoGroups) {
-        TMDB.recommend(d).then(function (groups) { d.recoGroups = groups || []; render(); });
+        TMDB.recommend(d).then(function (groups) {
+          d.recoGroups = groups || [];
+          // Numéro du film dans la saga, quand le catalogue ne le donne pas
+          var sg = d.recoGroups.filter(function (g) { return g.key === 'saga'; })[0];
+          var me = sg ? sg.items.filter(function (x) { return x.current; })[0] : null;
+          if (d.saga && me && me.order && !d.saga.order) {
+            d.saga.order = me.order;
+            var en = findEntry(type, id);
+            if (en && refreshFromDetail(en, d)) persist(en).catch(function () {});
+          }
+          render();
+        });
       }
       var e = findEntry(type, id);
       if (e && refreshFromDetail(e, d)) persist(e).then(render).catch(function () {});
@@ -693,7 +713,8 @@
         var vs = e.viewings.slice().sort(function (a, b) { return recKey(b).localeCompare(recKey(a)); });
         var last = vs[0];
         main += '<div class="facts">' +
-          '<div><span class="label">Vu le</span><span>' + esc(last.date ? fmtDate(last.date) : last.year ? 'En ' + last.year : 'Je ne sais plus') + '</span></div>' +
+          '<div><span class="label">Vu le</span><span>' + esc(last.date ? fmtDate(last.date) : last.year ? 'En ' + last.year : 'Je ne sais plus') +
+          ' <button type="button" class="linkish" style="font-size:14px" data-act="edit-rec" data-id="' + esc(e.id) + '" data-vid="' + esc(last.id) + '">modifier</button></span></div>' +
           '<div><span class="label">Où</span><span>' + esc(last.lieu) + ' · ' + esc(last.version) + '</span></div>' +
           '<div><span class="label">Avec</span><span>' + esc(last.avec || 'Seul·e') + '</span></div>' +
           '<div><span class="label">Visionnages</span><span>' + (vs.length === 1 ? '1re fois' : vs.length + ' fois') + '</span></div></div>';
@@ -746,7 +767,8 @@
             return '<button type="button"' + (accent ? ' class="seg--accent"' : '') + ' data-act="season-set" data-tid="' + esc(id) + '" data-s="' + s.n + '" data-st="' + val + '" aria-pressed="' + (st === val) + '">' + label + '</button>';
           }
           return '<div class="season-row"><span style="display:flex;flex-direction:column;gap:4px"><span class="season-row__name">Saison ' + s.n + '</span>' +
-            '<span class="muted" style="font-size:14px">' + plural(s.count, 'épisode', 'épisodes') + (r ? ' · ' + esc(st === 'vu' ? 'vue' : 'commencée') + ' ' + esc(r.date ? 'le ' + fmtDate(r.date) : r.year ? 'en ' + r.year : '') : '') + '</span></span>' +
+            '<span class="muted" style="font-size:14px">' + plural(s.count, 'épisode', 'épisodes') + (r ? ' · ' + esc(st === 'vu' ? 'vue' : 'commencée') + ' ' + esc(r.date ? 'le ' + fmtDate(r.date) : r.year ? 'en ' + r.year : '(date inconnue)') : '') +
+            (r && e ? ' <button type="button" class="linkish" style="font-size:14px" data-act="edit-rec" data-id="' + esc(e.id) + '" data-s="' + s.n + '">modifier la date</button>' : '') + '</span></span>' +
             '<div class="seg" role="group" aria-label="Saison ' + s.n + '">' + b('', 'Pas vue') + b('en_cours', 'En cours') + b('vu', 'Vue', true) + '</div></div>';
         }).join('') + '</div>' +
         '<span><button type="button" class="chip" data-act="series-all" data-tid="' + esc(id) + '">' + (seenS === ss.length ? 'Tout remettre à « Pas vue »' : 'J\'ai vu toutes les saisons') + '</button></span></section>';
@@ -757,7 +779,8 @@
       main += '<section class="section"><h2 class="h2 display">.Mes visionnages</h2><ul class="history">' +
         e.viewings.slice().sort(function (a, b) { return recKey(b).localeCompare(recKey(a)); }).map(function (v) {
           return '<li><span><b>' + esc(recLabel(v)) + '</b> · ' + esc(v.lieu) + ' · ' + esc(v.version) + (v.avec ? ' · avec ' + esc(v.avec) : '') + (v.rewatch ? ' · revisionnage' : '') + '</span>' +
-            confirmBtn('viewing:' + e.id + ':' + v.id, 'Supprimer') + '</li>';
+            '<span class="row__actions"><button type="button" class="danger" data-act="edit-rec" data-id="' + esc(e.id) + '" data-vid="' + esc(v.id) + '">Modifier</button>' +
+            confirmBtn('viewing:' + e.id + ':' + v.id, 'Supprimer') + '</span></li>';
         }).join('') + '</ul></section>';
     }
 
@@ -894,6 +917,7 @@
   function viewModal() {
     var m = state.modal;
     if (m.mode === 'poster') return posterModalHTML();
+    if (m.mode === 'editrec') return editRecHTML();
     var title = m.mode === 'edit' ? 'Modifier les infos' : m.step === 'manual' ? 'Ajout à la main' : m.mode === 'search' ? 'Rechercher' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'Ma vidéothèque';
     var body = '', foot = '';
     if (m.step === 'manual') {
@@ -993,6 +1017,29 @@
       toast('Enregistré dans ta vidéothèque');
       go('fiche-' + type + '-' + d.tmdb_id);
     }).catch(function () {});
+  }
+
+  /* ---------- Modifier un visionnage (date, lieu…) ou la date d'une saison ---------- */
+  function findRec(m) {
+    var e = findById(m.entryId);
+    if (!e) return null;
+    if (m.season) return { e: e, r: seasonRec(e, m.season) };
+    return { e: e, r: e.viewings.filter(function (v) { return v.id === m.vid; })[0] };
+  }
+  function editRecHTML() {
+    var m = state.modal, x = findRec(m), f = m.form;
+    if (!x || !x.r) return '';
+    var body = '<p style="margin:0"><b>' + esc(x.e.title) + '</b>' + (m.season ? ' · saison ' + m.season : '') + '</p>' + whenFields(f);
+    if (!m.season) {
+      body += chipGroup('lieu', LIEUX, f.lieu, 'Où') + chipGroup('version', [['VO', 'VO'], ['VF', 'VF']], f.version, 'Version') +
+        '<div class="field"><label class="label" for="m-avec">Avec qui (facultatif)</label><input id="m-avec" type="text" maxlength="80" data-input="m-avec" value="' + esc(f.avec) + '"></div>' +
+        '<label class="check"><input id="m-rewatch" type="checkbox" data-change="m-rewatch"' + (f.rewatch ? ' checked' : '') + '><span>C\'était un revisionnage</span></label>';
+    }
+    return '<div class="overlay" data-act="overlay"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="m-title">' +
+      '<div class="dialog__head"><span class="display" id="m-title">.' + (m.season ? 'Date de la saison' : 'Modifier le visionnage') + '</span>' +
+      '<button type="button" class="icon-btn" data-act="close-modal" aria-label="Fermer">' + ICON.close + '</button></div>' +
+      '<div class="dialog__body">' + body + '</div><div class="dialog__foot"><button type="button" class="btn" data-act="close-modal">Annuler</button>' +
+      '<button type="button" class="btn btn--accent" data-act="rec-save">Enregistrer</button></div></div></div>';
   }
 
   /* ---------- Ajout à la main ---------- */
@@ -1144,6 +1191,20 @@
     return '﻿' + rows.map(function (r) { return r.map(csvCell).join(';'); }).join('\r\n');
   }
 
+  /* ---------- Comment ça marche ---------- */
+  var HOWTO = [
+    ['Cherche un titre', 'Tape un film, une série ou un réalisateur dans la barre de recherche. Introuvable ? Ajoute-le à la main en deux secondes, ou vérifie sur Google.'],
+    ['Ajoute-le à ta vidéothèque', 'Bouton « J\'ai vu… » ou « + Vidéothèque » : indique quand (aujourd\'hui, hier, une date… ou « je ne sais plus »), où, en VO ou en VF, et avec qui.'],
+    ['Suis tes séries saison par saison', 'Chaque saison est « Pas vue », « En cours » ou « Vue ». Un clic sur « J\'ai fini la saison » et ta progression avance.'],
+    ['Note et écris ton avis', 'Note sur 5 cases : scénario, réalisation, acteurs, émotion, musique. Ton avis est privé, toi seul le vois. Tu peux corriger une date à tout moment.'],
+    ['Garde une liste À voir', 'Mets de côté ce qui te tente. Le soir, dis combien de minutes tu as et Séquence choisit un film de ta liste qui tient dans ce temps.'],
+    ['Découvre et fais le bilan', 'Sur chaque fiche : la saga dans l\'ordre, les films du même réalisateur, du même genre. Dans Stats : ton année, tes genres, ton objectif.']
+  ];
+  function howtoHTML() {
+    return '<ol class="howto">' + HOWTO.map(function (h) { return '<li><b>' + esc(h[0]) + '</b><span>' + esc(h[1]) + '</span></li>'; }).join('') + '</ol>' +
+      '<p class="note" style="margin:0">Ton journal est privé : personne d\'autre ne voit tes films, tes notes ni tes avis. Tu peux tout exporter ou tout supprimer depuis « Mon compte ».</p>';
+  }
+
   /* ---------- Connexion ---------- */
   function viewAuth() {
     var a = state.ui.auth;
@@ -1158,9 +1219,20 @@
     var links = a.mode === 'login'
       ? '<button type="button" class="linkish" data-act="auth-mode" data-v="signup">Pas encore de compte ? Crée-le</button><button type="button" class="linkish" data-act="auth-mode" data-v="reset">Mot de passe oublié</button>'
       : a.mode === 'newpw' ? '' : '<button type="button" class="linkish" data-act="auth-mode" data-v="login">J\'ai déjà un compte</button>';
+    var help = a.tab === 'help';
+    var tabs = a.mode === 'newpw' ? '' : '<div class="auth-tabs" role="tablist">' +
+      '<button type="button" role="tab" aria-selected="' + !help + '" data-act="auth-tab" data-v="form">' + (a.mode === 'signup' ? 'Créer un compte' : 'Connexion') + '</button>' +
+      '<button type="button" role="tab" aria-selected="' + help + '" data-act="auth-tab" data-v="help">Comment ça marche</button></div>';
+    if (help) {
+      return '<main class="auth wrap"><div class="auth__box auth__box--wide">' +
+        '<span class="auth__logo" aria-hidden="true">.SÉQUEN-<br><span>CE</span></span>' + tabs +
+        '<h1 class="h2 display">.Comment ça marche</h1>' + howtoHTML() +
+        '<span style="display:flex;flex-wrap:wrap;gap:10px"><button type="button" class="btn btn--accent" data-act="auth-mode" data-v="signup">Créer mon compte</button>' +
+        '<button type="button" class="btn" data-act="auth-mode" data-v="login">J\'ai déjà un compte</button></span></div></main>' + footer();
+    }
     return '<main class="auth wrap"><div class="auth__box">' +
       '<span class="auth__logo" aria-hidden="true">.SÉQUEN-<br><span>CE</span></span>' +
-      '<p style="margin:0;font-size:18px">Ton journal privé de films et de séries.</p>' +
+      '<p style="margin:0;font-size:18px">Ton journal privé de films et de séries.</p>' + tabs +
       '<h1 class="h2 display">.' + titles[a.mode] + '</h1>' +
       (a.msg ? '<p class="msg" role="status">' + esc(a.msg) + '</p>' : '') +
       (a.err ? '<p class="msg msg--err" role="alert">' + esc(a.err) + '</p>' : '') +
@@ -1378,6 +1450,37 @@
       state.modal = { mode: 'poster', step: 'poster', entryId: e.id, preview: e.poster_path || null, err: '', busy: false, focus: false };
       render();
     },
+    'edit-rec': function (t) {
+      var e = findById(t.dataset.id); if (!e) return;
+      var season = t.dataset.s ? parseInt(t.dataset.s, 10) : null;
+      var r = season ? seasonRec(e, season) : e.viewings.filter(function (v) { return v.id === t.dataset.vid; })[0];
+      if (!r) return;
+      state.modal = {
+        mode: 'editrec', step: 'editrec', entryId: e.id, vid: t.dataset.vid || null, season: season, focus: false,
+        form: { when: r.date ? 'other' : 'unknown', date: r.date || todayISO(), year: r.year || '', lieu: r.lieu || 'Streaming',
+          version: r.version || 'VO', avec: r.avec || '', rewatch: !!r.rewatch }
+      };
+      render();
+    },
+    'rec-save': function () {
+      var m = state.modal, x = findRec(m), f = m.form;
+      if (!x || !x.r) { closeModal(); return; }
+      if (f.when === 'unknown' && f.year !== '' && !(parseInt(f.year, 10) >= 1900 && parseInt(f.year, 10) <= CUR_YEAR)) {
+        toast('L\'année doit être entre 1900 et ' + CUR_YEAR + ', ou laisse le champ vide.', true); return;
+      }
+      if (f.when === 'other' && (!f.date || f.date > todayISO())) { toast('Choisis une date qui n\'est pas dans le futur.', true); return; }
+      var rec = recFromForm(f), e = x.e;
+      rec.added = x.r.added || rec.added;
+      if (m.season) {
+        e.episodes = Object.assign({}, e.episodes);
+        e.episodes['S' + m.season] = Object.assign({}, x.r, rec);
+      } else {
+        e.viewings = e.viewings.map(function (v) {
+          return v.id !== m.vid ? v : Object.assign({}, v, rec, { lieu: f.lieu, version: f.version, avec: f.avec.trim(), rewatch: !!f.rewatch });
+        });
+      }
+      persist(e).then(function () { state.modal = null; toast('Visionnage modifié'); render(); }).catch(function () {});
+    },
     'pf-remove': function () { state.modal.preview = null; state.modal.err = ''; render(); },
     'pf-save': function () {
       var m = state.modal, e = findById(m.entryId); if (!e) { closeModal(); return; }
@@ -1393,7 +1496,8 @@
       download('sequence-' + todayISO() + '.csv', exportCSV(), 'text/csv;charset=utf-8');
       accSet('export', 'Fichier tableur téléchargé. Il s\'ouvre avec Excel, Numbers ou Google Sheets.');
     },
-    'auth-mode': function (t) { state.ui.auth = { mode: t.dataset.v, msg: '', err: '', busy: false }; render(); }
+    'auth-mode': function (t) { state.ui.auth = { mode: t.dataset.v, msg: '', err: '', busy: false }; render(); },
+    'auth-tab': function (t) { state.ui.auth.tab = t.dataset.v; state.ui.auth.err = ''; render(); }
   };
 
   var forms = {

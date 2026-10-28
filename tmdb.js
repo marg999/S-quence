@@ -151,6 +151,62 @@
     }
     return null;
   }
+  // Long métrage seulement (pas les courts métrages ni les compilations de 20 min)
+  function isFeature(ent) {
+    if (!isFilm(ent)) return false;
+    var p31 = claimValues(ent, 'P31').map(function (v) { return v && v.id; });
+    if (p31.indexOf('Q24862') !== -1 && p31.indexOf('Q24869') === -1) return false; // court métrage
+    var rt = filmRuntime(ent);
+    return !(rt && rt < 40);
+  }
+
+  /* --- Sagas ---
+   * Sur Wikidata, un film peut être rangé dans plusieurs « séries » : sa vraie saga (Cars)
+   * mais aussi un catalogue (« films Pixar », « Classiques Disney »…). On garde la saga dont le nom
+   * ressemble au titre du film, et on écarte les catalogues de studio. */
+  var STOP = { le: 1, la: 1, les: 1, l: 1, un: 1, une: 1, the: 1, a: 1, an: 1, de: 1, des: 1, du: 1, of: 1, et: 1, and: 1 };
+  var CATALOG_RE = /pixar|disney|dreamworks|ghibli|illumination|blue sky|aardman|laika|warner|universal|paramount|\b(liste?|list|catalogue|filmographie|filmography)\b|films? (d'animation|de |du |des )|feature films|animated (feature|film)s|classiques/i;
+  function cleanSagaLabel(s) { return String(s || '').replace(/\s*\([^)]*\)\s*$/, '').replace(/^(saga|franchise|série de films|film series)\s+/i, '').trim(); }
+  // « Cars 2 » → « cars », « Dune : Deuxième partie » → « dune », « Toy Story 3 » → « toy story »
+  function titleStem(t) {
+    var head = norm(t).split(/\s*[:–—,(]\s*|\s+-\s+/)[0];
+    var words = head.split(/\s+/), out = [];
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i].replace(/^l'/, '').replace(/[^a-z0-9]/g, '');
+      if (!w) continue;
+      if (/^\d+$/.test(w) || /^(ii|iii|iv|v|vi|vii|viii|ix|x)$/.test(w) || /^(episode|chapitre|chapter|part|partie|volume|vol)$/.test(w)) break;
+      if (!out.length && STOP[w]) continue;
+      out.push(w);
+    }
+    return out.join(' ');
+  }
+  function sameFamily(a, b) {
+    var sa = titleStem(a), sb = titleStem(b);
+    if (sa.length < 3 || sb.length < 3) return false;
+    return sa === sb || sa.indexOf(sb + ' ') === 0 || sb.indexOf(sa + ' ') === 0;
+  }
+  function labelMatchesTitle(lbl, title) {
+    var l = norm(cleanSagaLabel(lbl)), st = titleStem(title);
+    if (l.length < 3 || st.length < 3) return false;
+    return l === st || (' ' + l + ' ').indexOf(' ' + st + ' ') !== -1 || (' ' + st + ' ').indexOf(' ' + l + ' ') !== -1;
+  }
+  function pickSaga(cands, labels, title) {
+    var best = null, bestScore = 0;
+    cands.forEach(function (id) {
+      var l = label(labels[id]);
+      if (!l) return;
+      var score = labelMatchesTitle(l, title) ? 3 : CATALOG_RE.test(l) ? 0 : 1;
+      if (score > bestScore) { best = id; bestScore = score; }
+    });
+    return best;
+  }
+  function stemSaga(title) {
+    var st = titleStem(title);
+    if (!st) return null;
+    var original = String(title).split(/\s*[:\-–—]\s*|\s+\d/)[0].trim();
+    return { id: 'titre:' + st, label: original || st, order: null };
+  }
+
   function commons(f) { return 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=342'; }
 
   function getEntities(ids, props) {
@@ -262,26 +318,38 @@
         if (!ent || ent.missing) throw new Error('Film introuvable sur Wikidata.');
         var dirIds = claimValues(ent, 'P57').map(function (v) { return v.id; }).filter(Boolean).slice(0, 4);
         var genreIds = claimValues(ent, 'P136').map(function (v) { return v.id; }).filter(Boolean).slice(0, 6);
-        var sagaId = (claimValues(ent, 'P179')[0] || {}).id || null;
-        var labels = getEntities(dirIds.concat(genreIds).concat(sagaId ? [sagaId] : []), 'labels').catch(function () { return {}; });
+        var sagaCands = uniq(claimValues(ent, 'P179').concat(claimValues(ent, 'P8345')).map(function (v) { return v && v.id; })).slice(0, 8);
+        var neigh = uniq(claimValues(ent, 'P155').concat(claimValues(ent, 'P156')).map(function (v) { return v && v.id; })).slice(0, 6);
+        var labels = getEntities(dirIds.concat(genreIds, sagaCands, neigh), 'labels').catch(function () { return {}; });
         var posters = filmPosters([ent]).catch(function () { return {}; });
         return Promise.all([labels, posters]).then(function (res) {
           var more = res[0];
           var desc = ent.descriptions ? (ent.descriptions.fr || ent.descriptions.en) : null;
           var genres = [];
           genreIds.forEach(function (g) { var c = cleanGenre(label(more[g])); if (c && genres.indexOf(c) === -1) genres.push(c); });
-          var sagaLabel = sagaId ? label(more[sagaId]).replace(/\s*\((série de films|film series|saga)\)\s*$/i, '') : '';
+          var title = label(ent);
+          var prev = claimValues(ent, 'P155').map(function (v) { return v.id; }).filter(Boolean);
+          var next = claimValues(ent, 'P156').map(function (v) { return v.id; }).filter(Boolean);
+          var sagaId = pickSaga(sagaCands, more, title);
+          var saga = null;
+          if (sagaId) saga = { id: sagaId, label: cleanSagaLabel(label(more[sagaId])) || 'Saga', order: sagaOrder(ent, sagaId) };
+          else {
+            // Pas de saga propre sur Wikidata : on regroupe par titre (« Cars », « Cars 2 »…) si le film a une suite ou un précédent,
+            // ou si son titre contient un numéro
+            var hasNeighbour = neigh.some(function (q) { return sameFamily(title, label(more[q])); });
+            if (hasNeighbour || /\s(\d|ii|iii|iv)\b/i.test(title)) saga = stemSaga(title);
+          }
           return {
-            tmdb_id: id, media_type: 'movie', title: label(ent), year: filmYear(ent), poster_path: res[1][qid] || null,
+            tmdb_id: id, media_type: 'movie', title: title, year: filmYear(ent), poster_path: res[1][qid] || null,
             overview: desc ? desc.value.charAt(0).toUpperCase() + desc.value.slice(1) + '.' : '',
             runtime: filmRuntime(ent), ep_runtime: null, genres: genres,
             director: dirIds.map(function (d) { return label(more[d]); }).filter(Boolean).join(', '),
             seasons: [],
-            saga: sagaId ? { id: sagaId, label: sagaLabel || 'Saga', order: sagaOrder(ent, sagaId) } : null,
+            saga: saga,
             _directorIds: dirIds,
             _genreIds: genreIds,
-            _prev: claimValues(ent, 'P155').map(function (v) { return v.id; }).filter(Boolean),
-            _next: claimValues(ent, 'P156').map(function (v) { return v.id; }).filter(Boolean)
+            _prev: prev,
+            _next: next
           };
         });
       });
@@ -289,29 +357,42 @@
 
     recommend: function (d) {
       var self = 'Q' + d.tmdb_id;
-      var sagaP = d.saga ? searchIds('haswbstatement:P179=' + d.saga.id, 30)
-        : Promise.resolve((d._prev || []).concat(d._next || []));
+      var realSaga = d.saga && /^Q\d+$/.test(d.saga.id);
+      var neighbours = (d._prev || []).concat(d._next || []);
+      var stem = titleStem(d.title);
+      // 3 sources pour la saga : la saga Wikidata, les films « suite de / précédé par », et les films au titre de la même famille
+      var sagaP = Promise.all([
+        realSaga ? searchIds('haswbstatement:P179=' + d.saga.id, 40) : Promise.resolve([]),
+        realSaga ? searchIds('haswbstatement:P8345=' + d.saga.id + FILMQ, 30) : Promise.resolve([]),
+        stem.length >= 3 ? searchIds(stem + FILMQ, 30) : Promise.resolve([])
+      ]).then(function (r) { return { bySaga: uniq(r[0].concat(r[1])), byTitle: r[2] }; });
       var dir = (d._directorIds || [])[0];
-      var dirP = dir ? searchIds('haswbstatement:P57=' + dir + FILMQ, 20) : Promise.resolve([]);
+      var dirP = dir ? searchIds('haswbstatement:P57=' + dir + FILMQ, 30) : Promise.resolve([]);
       var genre = (d._genreIds || [])[0];
       var genP = genre ? searchIds('haswbstatement:P136=' + genre + FILMQ, 40) : Promise.resolve([]);
       return Promise.all([sagaP, dirP, genP]).then(function (res) {
         var sg = res[0], dr = res[1], gn = res[2];
-        var all = uniq([self].concat(sg, dr, gn).filter(function (q) { return /^Q\d+$/.test(q); })).slice(0, 100);
+        var all = uniq([self].concat(neighbours, sg.bySaga, sg.byTitle, dr, gn).filter(function (q) { return /^Q\d+$/.test(q); })).slice(0, 150);
         return getEntities(all, 'labels|claims|sitelinks/all').then(function (ents) {
-          function ok(q) { var e = ents[q]; return e && !e.missing && label(e) && isFilm(e); }
+          function ok(q) { var e = ents[q]; return e && !e.missing && label(e) && isFeature(e); }
           function item(q, extra) {
             var e = ents[q];
             return Object.assign({ tmdb_id: parseInt(q.slice(1), 10), media_type: 'movie', title: label(e), year: filmYear(e) }, extra || {});
           }
           var used = {};
-          var saga = uniq(sg.concat(sg.length ? [self] : [])).filter(ok).map(function (q) {
-            return item(q, { order: d.saga ? sagaOrder(ents[q], d.saga.id) : null, current: q === self });
+          // Si la « saga » Wikidata compte trop de films, c'est un catalogue : on ne garde que les titres de la même famille
+          var bySaga = sg.bySaga.length > 15 ? sg.bySaga.filter(function (q) { return ents[q] && sameFamily(d.title, label(ents[q])); }) : sg.bySaga;
+          var byTitle = sg.byTitle.filter(function (q) { return ents[q] && sameFamily(d.title, label(ents[q])); });
+          var byNeigh = neighbours.filter(function (q) { return ents[q] && (realSaga || sameFamily(d.title, label(ents[q]))); });
+          var saga = uniq([self].concat(bySaga, byNeigh, byTitle)).filter(function (q) { return q === self || ok(q); }).map(function (q) {
+            return item(q, { order: realSaga ? sagaOrder(ents[q], d.saga.id) : null, current: q === self });
           });
+          var allOrdered = saga.every(function (x) { return x.order != null; });
           saga.sort(function (a, b) {
-            if (a.order != null && b.order != null && a.order !== b.order) return a.order - b.order;
+            if (allOrdered && a.order !== b.order) return a.order - b.order;
             return (a.year || 9999) - (b.year || 9999);
           });
+          if (!allOrdered) saga.forEach(function (x, i) { x.order = i + 1; });
           if (saga.length < 2) saga = [];
           used[self] = 1;
           saga.forEach(function (x) { used['Q' + x.tmdb_id] = 1; });
@@ -322,7 +403,7 @@
             .map(function (q) { return { it: item(q), pop: Object.keys(ents[q].sitelinks || {}).length }; })
             .sort(function (a, b) { return b.pop - a.pop; }).slice(0, 6).map(function (x) { return x.it; });
           var groups = [];
-          if (saga.length) groups.push({ key: 'saga', title: 'La saga' + (d.saga ? ' · ' + d.saga.label : ''), items: saga });
+          if (saga.length) groups.push({ key: 'saga', title: 'La saga · ' + (d.saga ? d.saga.label : (stemSaga(d.title) || {}).label || d.title), items: saga });
           if (director.length) groups.push({ key: 'director', title: 'Du même réalisateur', items: director });
           groups.push({ key: 'genre', title: 'Du même genre' + (d.genres && d.genres[0] ? ' · ' + d.genres[0] : ''), items: genreItems });
           return groups;

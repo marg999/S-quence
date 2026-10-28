@@ -373,3 +373,20 @@ main { padding-block: 36px 64px; }
 .note { font-size: 14px; color: var(--muted); margin: 0; }
 .year-pick { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .year-pick input { width: 110px; }
+
+/* ---------- Comment ça marche ---------- */
+.auth-tabs { display: flex; border-bottom: 2px solid var(--line); gap: 0; }
+.auth-tabs button { flex: 1 1 0; min-height: 46px; background: none; border: 0; border-bottom: 4px solid transparent; margin-bottom: -2px;
+  font: inherit; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; font-size: 13px; color: inherit; cursor: pointer; }
+.auth-tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent-text); }
+.auth__box--wide { max-width: 760px; }
+.howto { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; counter-reset: howto; }
+.howto li { counter-increment: howto; border: 2px solid var(--line); background: var(--paper); padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; line-height: 1.45; }
+.howto li::before { content: "." counter(howto); font-family: 'Anton', Impact, sans-serif; font-size: 34px; line-height: 1; color: var(--accent-text); }
+.howto b { font-size: 17px; }
+.help { border: 2px solid var(--line); }
+.help > summary { cursor: pointer; list-style: none; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.help > summary::-webkit-details-marker { display: none; }
+.help > summary::after { content: "+"; font-family: 'Anton', Impact, sans-serif; font-size: 30px; line-height: 1; }
+.help[open] > summary::after { content: "–"; }
+.help > div { padding: 0 20px 20px; display: flex; flex-direction: column; gap: 14px; }
