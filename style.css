@@ -333,3 +333,43 @@ main { padding-block: 36px 64px; }
 @media (prefers-reduced-motion: no-preference) {
   .btn, .chip, .ep, .cell { transition: background-color .12s ease, color .12s ease; }
 }
+
+/* ============================================================
+   Mise à jour : vidéothèque, saisons, recommandations, compte
+   ============================================================ */
+.in-lib {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  background: var(--fg); color: var(--bg); font-family: var(--display); font-size: 20px; text-transform: uppercase; line-height: 1;
+}
+.in-lib svg { flex: 0 0 auto; }
+
+/* Saisons : Pas vue / En cours / Vue */
+.seasons { display: flex; flex-direction: column; border-top: 2px solid var(--line); }
+.season-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 16px; padding: 12px 0; border-bottom: 2px solid var(--line); }
+.season-row__name { font-family: var(--display); font-size: 24px; text-transform: uppercase; line-height: 1; }
+.seg { display: flex; flex-wrap: wrap; border: 2px solid var(--line); }
+.seg button { min-height: 44px; padding: 0 12px; border: 0; background: transparent; color: var(--fg); font-weight: 700; font-size: 13px; letter-spacing: .6px; text-transform: uppercase; cursor: pointer; }
+.seg button + button { border-left: 2px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.seg button.seg--accent[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+
+/* Résultat de recherche avec bouton « + Vidéothèque » */
+.result-row { display: flex; gap: 6px; align-items: stretch; }
+.result-row .result { flex: 1 1 auto; min-width: 0; }
+.quick { flex: 0 0 auto; border: 2px solid var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 12px; letter-spacing: .6px; text-transform: uppercase; padding: 0 10px; cursor: pointer; max-width: 120px; line-height: 1.2; }
+.quick:hover { background: var(--fg); border-color: var(--fg); color: var(--bg); }
+
+/* Recommandations par rangées */
+.reco-group { display: flex; flex-direction: column; gap: 10px; }
+.reco-group + .reco-group { margin-top: 18px; }
+.reco--current { box-shadow: inset 0 0 0 3px var(--accent); }
+.reco .label { font-size: 11px; }
+
+/* Mon compte */
+.account-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; align-items: start; }
+.panel form { display: flex; flex-direction: column; gap: 12px; }
+.panel--danger { border-color: var(--accent); }
+.panel--danger .h3 { color: var(--accent-text); }
+.note { font-size: 14px; color: var(--muted); margin: 0; }
+.year-pick { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.year-pick input { width: 110px; }

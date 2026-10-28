@@ -1,6 +1,11 @@
 /*
  * Séquence — application (journal privé de films et de séries)
- * Pages : #journal, #videotheque, #a-voir, #stats, #fiche-movie-123, #fiche-tv-123
+ * Pages : #journal, #videotheque, #a-voir, #stats, #compte, #fiche-movie-123, #fiche-tv-123
+ *
+ * Dates de visionnage : { date: 'AAAA-MM-JJ' | null, year: AAAA | null, added: 'AAAA-MM-JJ' }
+ *   date connue → compte au mois ; « je ne sais plus » → compte dans l'année indiquée,
+ *   sinon dans l'année où le titre a été enregistré.
+ * Saisons d'une série (colonne episodes) : { "S1": { st: 'vu' | 'en_cours', date, year, added } }
  */
 (function () {
   'use strict';
@@ -19,7 +24,8 @@
   var ICON = {
     search: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M15.5 15.5L21 21"></path></svg>',
     theme: '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2.2"></circle><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"></path></svg>',
-    close: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>'
+    close: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
+    check: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="square" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"></path></svg>'
   };
 
   var state = {
@@ -37,12 +43,12 @@
       editGoal: false,
       tonightMin: 90,
       tonight: null,
-      lib: { type: 'all', status: 'seen', genre: '', sort: 'recent', q: '' },
+      lib: { type: 'all', status: 'seen', genre: '', saga: '', sort: 'recent', q: '' },
       statsYear: new Date().getFullYear(),
-      season: {},
       confirm: null,
       recovery: false,
-      auth: { mode: 'login', msg: '', err: '', busy: false }
+      auth: { mode: 'login', msg: '', err: '', busy: false },
+      account: { msg: {}, err: {} }
     }
   };
 
@@ -70,6 +76,24 @@
   function fmtNum(n) { return String(Math.round(n * 10) / 10).replace('.', ','); }
   function hashCode(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
   function plural(n, one, many) { return n + ' ' + (n > 1 ? many : one); }
+  var CUR_YEAR = new Date().getFullYear();
+
+  /* ---------- Dates de visionnage ---------- */
+  function recYear(r) {
+    if (!r) return null;
+    if (r.date) return parseInt(r.date.slice(0, 4), 10);
+    if (r.year) return parseInt(r.year, 10);
+    return r.added ? parseInt(r.added.slice(0, 4), 10) : null;
+  }
+  function recMonth(r) { return r && r.date ? parseInt(r.date.slice(5, 7), 10) - 1 : null; }
+  function recKey(r) { return r ? (r.date || (r.year ? r.year + '-00-00' : '') || r.added || '') : ''; }
+  function recLabel(r) {
+    if (!r) return '';
+    if (r.date) return fmtDate(r.date);
+    if (r.year) return 'En ' + r.year + ' (date exacte inconnue)';
+    return 'Date inconnue';
+  }
+  function recShort(r) { return !r ? '' : r.date ? fmtShort(r.date) : r.year ? String(r.year) : '?'; }
 
   /* ---------- Données ---------- */
   function key(type, id) { return type + '-' + id; }
@@ -85,34 +109,55 @@
     return null;
   }
   function sortedSeasons(e) { return (e.seasons || []).slice().sort(function (a, b) { return a.n - b.n; }); }
-  function totalEps(e) { return (e.seasons || []).reduce(function (s, x) { return s + (x.count || 0); }, 0); }
-  function seenEps(e) { return Object.keys(e.episodes || {}).length; }
-  function nextEp(e) {
+  function seasonRec(e, n) { return (e.episodes || {})['S' + n] || null; }
+  function seasonState(e, n) { var r = seasonRec(e, n); return r ? r.st : ''; }
+  function seasonsSeen(e) { return sortedSeasons(e).filter(function (s) { return seasonState(e, s.n) === 'vu'; }).length; }
+  function nextSeason(e) {
     var ss = sortedSeasons(e);
-    for (var i = 0; i < ss.length; i++) {
-      for (var n = 1; n <= ss[i].count; n++) if (!e.episodes[ss[i].n + '-' + n]) return { s: ss[i].n, e: n };
-    }
+    for (var i = 0; i < ss.length; i++) if (seasonState(e, ss[i].n) !== 'vu') return { n: ss[i].n, st: seasonState(e, ss[i].n), count: ss[i].count };
     return null;
   }
-  function lastEpDate(e) {
-    var max = '';
-    Object.keys(e.episodes || {}).forEach(function (k) { if (e.episodes[k] > max) max = e.episodes[k]; });
-    return max;
+  function seasonRecs(e) { return Object.keys(e.episodes || {}).map(function (k) { return e.episodes[k]; }).filter(Boolean); }
+  function lastRec(e) {
+    var best = null;
+    (e.viewings || []).concat(e.media_type === 'tv' ? seasonRecs(e) : []).forEach(function (r) {
+      if (!best || recKey(r) > recKey(best)) best = r;
+    });
+    return best;
   }
-  function lastActivity(e) {
-    var max = lastEpDate(e);
-    (e.viewings || []).forEach(function (v) { if (v.date > max) max = v.date; });
-    return max;
-  }
-  function hasActivity(e) { return !!(e && ((e.viewings || []).length || seenEps(e))); }
+  function lastActivity(e) { return recKey(lastRec(e)); }
+  function hasActivity(e) { return !!(e && ((e.viewings || []).length || seasonRecs(e).length)); }
+  function sagaOf(e) { return e && e.notes && e.notes._saga ? e.notes._saga : null; }
+
   function computeStatus(e) {
     if (e.media_type === 'movie') return (e.viewings || []).length ? 'vu' : 'a_voir';
-    var seen = seenEps(e), tot = totalEps(e);
-    if (tot && seen >= tot) return 'vu';
-    if (e.status === 'abandonne' && seen) return 'abandonne';
-    if (!seen) return 'a_voir';
+    var ss = sortedSeasons(e);
+    var any = seasonRecs(e).length;
+    if (ss.length && seasonsSeen(e) >= ss.length) return 'vu';
+    if (e.status === 'abandonne' && any) return 'abandonne';
+    if (!any) return 'a_voir';
     return 'en_cours';
   }
+
+  // Ancien format (épisode par épisode « 1-3 ») → saisons. Saison complète = vue, commencée = en cours.
+  function migrateEpisodes(e) {
+    var keys = Object.keys(e.episodes || {});
+    if (!keys.some(function (k) { return /^\d+-\d+$/.test(k); })) return false;
+    var ne = {};
+    keys.forEach(function (k) { if (/^S\d+$/.test(k)) ne[k] = e.episodes[k]; });
+    sortedSeasons(e).forEach(function (s) {
+      if (ne['S' + s.n]) return;
+      var dates = [];
+      for (var i = 1; i <= s.count; i++) if (e.episodes[s.n + '-' + i]) dates.push(e.episodes[s.n + '-' + i]);
+      if (!dates.length) return;
+      dates.sort();
+      var last = dates[dates.length - 1];
+      ne['S' + s.n] = { st: dates.length >= s.count ? 'vu' : 'en_cours', date: last, year: null, added: last };
+    });
+    e.episodes = ne;
+    return true;
+  }
+
   function normalizeEntry(e) {
     e.notes = e.notes || {};
     e.season_notes = e.season_notes || {};
@@ -121,32 +166,39 @@
     e.seasons = e.seasons || [];
     e.genres = e.genres || [];
     e.avis = e.avis || '';
+    if (e.media_type === 'tv' && migrateEpisodes(e)) e._migrated = true;
     e.status = computeStatus(e);
     return e;
   }
   function newEntry(d) {
+    var notes = {};
+    if (d.saga) notes._saga = { id: d.saga.id, label: d.saga.label, order: d.saga.order || null };
     return normalizeEntry({
       tmdb_id: d.tmdb_id, media_type: d.media_type, title: d.title, year: d.year || null,
       poster_path: d.poster_path || null, runtime: d.runtime || null, ep_runtime: d.ep_runtime || null,
       genres: (d.genres || []).slice(), director: d.director || '', seasons: (d.seasons || []).slice(),
-      status: 'a_voir', notes: {}, season_notes: {}, per_season: false, avis: '', viewings: [], episodes: {}
+      status: 'a_voir', notes: notes, season_notes: {}, per_season: false, avis: '', viewings: [], episodes: {}
     });
   }
+  // Complète la fiche enregistrée avec les infos du catalogue ; renvoie true si quelque chose a changé
   function refreshFromDetail(e, d) {
-    if (!d) return e;
-    if (d.seasons && d.seasons.length) e.seasons = d.seasons.slice();
-    if (d.poster_path && !e.poster_path) e.poster_path = d.poster_path; // ne remplace jamais une affiche choisie
-    if (d.runtime) e.runtime = d.runtime;
-    if (d.ep_runtime) e.ep_runtime = d.ep_runtime;
-    if (d.genres && d.genres.length) e.genres = d.genres.slice();
-    if (d.director) e.director = d.director;
-    return e;
+    if (!d) return false;
+    var changed = false;
+    if (d.seasons && d.seasons.length && JSON.stringify(e.seasons) !== JSON.stringify(d.seasons)) { e.seasons = d.seasons.slice(); changed = true; }
+    if (d.poster_path && !e.poster_path) { e.poster_path = d.poster_path; changed = true; } // ne remplace jamais une affiche choisie
+    if (d.runtime && !e.runtime) { e.runtime = d.runtime; changed = true; }
+    if (d.ep_runtime && !e.ep_runtime) { e.ep_runtime = d.ep_runtime; changed = true; }
+    if (d.genres && d.genres.length && !e.genres.length) { e.genres = d.genres.slice(); changed = true; }
+    if (d.director && !e.director) { e.director = d.director; changed = true; }
+    if (d.saga && !sagaOf(e)) { e.notes = Object.assign({}, e.notes, { _saga: { id: d.saga.id, label: d.saga.label, order: d.saga.order || null } }); changed = true; }
+    return changed;
   }
   function entryFor(type, id) {
     return findEntry(type, id) || (state.details[key(type, id)] ? newEntry(state.details[key(type, id)]) : null);
   }
 
   function persist(e) {
+    delete e._migrated;
     e.status = computeStatus(e);
     return store.saveEntry(e).then(function (saved) {
       normalizeEntry(saved);
@@ -178,7 +230,7 @@
     el.className = 'toast' + (isErr ? ' toast--err' : '');
     el.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.hidden = true; }, 3000);
+    toastTimer = setTimeout(function () { el.hidden = true; }, 3200);
   }
 
   function poster(e, opts) {
@@ -199,14 +251,13 @@
     return '<header class="top"><div class="wrap">' +
       '<a class="logo" href="#journal" aria-label="Séquence, retour au journal">.SÉQUENCE</a>' +
       '<nav class="nav" aria-label="Navigation principale">' +
-      nav('journal', 'Journal') + nav('videotheque', 'Vidéothèque') + nav('a-voir', 'À voir') + nav('stats', 'Stats') +
+      nav('journal', 'Journal') + nav('videotheque', 'Vidéothèque') + nav('a-voir', 'À voir') + nav('stats', 'Stats') + nav('compte', 'Mon compte') +
       '</nav><div class="tools">' +
       '<button type="button" class="search-btn" data-act="open-search">' + ICON.search + '<span>Film, série, réalisateur</span></button>' +
       '<button type="button" class="btn btn--accent btn--small" data-act="open-add">J\'ai vu…</button>' +
       '<button type="button" class="icon-btn" data-act="theme" aria-label="Basculer entre mode clair et mode sombre">' + ICON.theme + '</button>' +
-      (store.demo ? '' : '<button type="button" class="text-btn" data-act="logout">Déconnexion</button>') +
       '</div></div></header>' +
-      (store.demo ? '<div class="demo-bar"><div class="wrap"><span><b>Mode démo.</b> Tes données restent dans ce navigateur. Renseigne config.js pour activer les comptes et la recherche TMDB.</span>' +
+      (store.demo ? '<div class="demo-bar"><div class="wrap"><span><b>Mode démo.</b> Tes données restent dans ce navigateur. Renseigne config.js pour activer les comptes.</span>' +
         '<button type="button" data-act="reset-demo">Remettre les exemples</button></div></div>' : '');
   }
 
@@ -234,17 +285,35 @@
     return '<button type="button" class="danger" data-act="ask-confirm" data-what="' + esc(what) + '">' + esc(label || 'Supprimer') + '</button>';
   }
 
-  /* ---------- Journal ---------- */
-  function viewJournal() {
-    var y = new Date().getFullYear();
-    var es = state.entries;
-    var now = new Date();
-    var dateLabel = '.' + now.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
+  function googleLink(q, kind) {
+    q = String(q || '').trim();
+    if (!q) return '';
+    var url = 'https://www.google.com/search?q=' + encodeURIComponent(q + (kind === 'tv' ? ' série' : kind === 'movie' ? ' film' : ''));
+    return '<a class="link" href="' + esc(url) + '" target="_blank" rel="noopener">Chercher « ' + esc(q) + ' » sur Google ↗</a>';
+  }
 
-    var films = 0;
-    es.forEach(function (e) {
-      if (e.media_type === 'movie') e.viewings.forEach(function (v) { if (v.date.slice(0, 4) === String(y)) films++; });
+  function tile(e, tag, meta) {
+    var note = e.notes && e.notes.gen ? e.notes.gen + '/5' : '';
+    var hasImg = !!TMDB.img(e.poster_path);
+    return '<a class="tile" href="#fiche-' + e.media_type + '-' + e.tmdb_id + '">' + poster(e, { tag: tag }) +
+      (hasImg ? '<span style="font-weight:700;font-size:14px;line-height:1.3">' + esc(e.title) + '</span>' : '') +
+      '<span class="tile__meta num"><span>' + esc(meta || '') + '</span><span class="tile__note">' + note + '</span></span></a>';
+  }
+
+  /* ---------- Journal ---------- */
+  function filmsInYear(y) {
+    var n = 0;
+    state.entries.forEach(function (e) {
+      if (e.media_type === 'movie') e.viewings.forEach(function (v) { if (recYear(v) === y) n++; });
     });
+    return n;
+  }
+
+  function viewJournal() {
+    var y = CUR_YEAR;
+    var es = state.entries;
+    var dateLabel = '.' + new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
+    var films = filmsInYear(y);
     var goal = state.goal;
     var pct = goal ? Math.min(100, Math.round(films / goal * 100)) : 0;
     var dayOfYear = (Date.now() - new Date(y, 0, 1).getTime()) / 864e5;
@@ -269,31 +338,31 @@
 
     if (!es.length) {
       return '<div class="stack">' + hero + '<div class="empty"><span class="h2 display">.Ton journal est vide</span>' +
-        '<p style="margin:0;max-width:60ch">Commence par le dernier film ou la dernière série que tu as regardés. Tu pourras les noter et suivre tes épisodes.</p>' +
+        '<p style="margin:0;max-width:60ch">Commence par le dernier film ou la dernière série que tu as regardés. Tu pourras les noter et suivre tes saisons.</p>' +
         '<button type="button" class="btn btn--accent" data-act="open-add">J\'ai vu…</button></div></div>';
     }
 
     var enCours = es.filter(function (e) { return e.status === 'en_cours'; })
       .sort(function (a, b) { return lastActivity(b).localeCompare(lastActivity(a)); });
     var enCoursHTML = enCours.length ? '<div class="grid-2">' + enCours.map(function (e) {
-      var n = nextEp(e), tot = totalEps(e), seen = seenEps(e);
+      var n = nextSeason(e), tot = sortedSeasons(e).length, seen = seasonsSeen(e);
       return '<div class="card">' + poster(e, { thumb: true }) + '<div class="card__body">' +
         '<a class="card__title" href="#fiche-tv-' + e.tmdb_id + '">' + esc(e.title) + '</a>' +
-        '<span>' + (n ? 'Saison ' + n.s + ' · prochain : épisode ' + n.e : 'Tout est vu') + '</span>' +
+        '<span>' + (n ? 'Saison ' + n.n + (n.st === 'en_cours' ? ' en cours' : ' à voir') : 'Tout est vu') + '</span>' +
         '<span class="bar"><span style="width:' + (tot ? Math.round(seen / tot * 100) : 0) + '%"></span></span>' +
-        '<span class="label num">' + seen + ' / ' + tot + ' épisodes</span>' +
-        (n ? '<span><button type="button" class="btn btn--ink btn--small" data-act="quick-ep" data-id="' + esc(e.id) + '">J\'ai vu S' + n.s + ' · É' + n.e + '</button></span>' : '') +
+        '<span class="label num">' + seen + ' / ' + plural(tot, 'saison vue', 'saisons vues') + '</span>' +
+        (n ? '<span><button type="button" class="btn btn--ink btn--small" data-act="season-done" data-id="' + esc(e.id) + '" data-s="' + n.n + '">J\'ai fini la saison ' + n.n + '</button></span>' : '') +
         '</div></div>';
     }).join('') + '</div>' : '<p class="muted" style="margin:0">Aucune série en cours.</p>';
 
     var recent = [];
     es.forEach(function (e) {
-      if (e.media_type === 'movie') e.viewings.forEach(function (v) { recent.push({ e: e, date: v.date, tag: v.rewatch ? 'Revu' : 'Film' }); });
-      else { var d = lastEpDate(e); if (d) recent.push({ e: e, date: d, tag: 'Série' }); }
+      if (e.media_type === 'movie') e.viewings.forEach(function (v) { recent.push({ e: e, r: v, tag: v.rewatch ? 'Revu' : 'Film' }); });
+      else { var r = lastRec(e); if (r) recent.push({ e: e, r: r, tag: 'Série' }); }
     });
-    recent.sort(function (a, b) { return b.date.localeCompare(a.date); });
+    recent.sort(function (a, b) { return recKey(b.r).localeCompare(recKey(a.r)); });
     recent = recent.slice(0, 10);
-    var recentHTML = recent.length ? '<div class="posters">' + recent.map(function (r) { return tile(r.e, r.tag, fmtShort(r.date)); }).join('') + '</div>'
+    var recentHTML = recent.length ? '<div class="posters">' + recent.map(function (x) { return tile(x.e, x.tag, recShort(x.r)); }).join('') + '</div>'
       : '<p class="muted" style="margin:0">Rien de vu pour l\'instant.</p>';
 
     var aVoir = es.filter(function (e) { return e.status === 'a_voir'; })
@@ -321,14 +390,6 @@
       '</div>';
   }
 
-  function tile(e, tag, meta) {
-    var note = e.notes && e.notes.gen ? e.notes.gen + '/5' : '';
-    var hasImg = !!TMDB.img(e.poster_path);
-    return '<a class="tile" href="#fiche-' + e.media_type + '-' + e.tmdb_id + '">' + poster(e, { tag: tag }) +
-      (hasImg ? '<span style="font-weight:700;font-size:14px;line-height:1.3">' + esc(e.title) + '</span>' : '') +
-      '<span class="tile__meta num"><span>' + esc(meta || '') + '</span><span class="tile__note">' + note + '</span></span></a>';
-  }
-
   /* ---------- Vidéothèque ---------- */
   function libFiltered() {
     var f = state.ui.lib;
@@ -338,10 +399,16 @@
       if (f.status === 'seen' && !hasActivity(e)) return false;
       if (f.status !== 'seen' && f.status !== 'all' && e.status !== f.status) return false;
       if (f.genre && e.genres.indexOf(f.genre) === -1) return false;
+      if (f.saga && !(sagaOf(e) && sagaOf(e).id === f.saga)) return false;
       if (q && (e.title + ' ' + e.director).toLowerCase().indexOf(q) === -1) return false;
       return true;
     });
     list.sort(function (a, b) {
+      if (f.saga) {
+        var oa = sagaOf(a).order, ob = sagaOf(b).order;
+        if (oa != null && ob != null && oa !== ob) return oa - ob;
+        return (a.year || 9999) - (b.year || 9999);
+      }
       if (f.sort === 'note') return (b.notes.gen || 0) - (a.notes.gen || 0) || a.title.localeCompare(b.title, 'fr');
       if (f.sort === 'title') return a.title.localeCompare(b.title, 'fr');
       if (f.sort === 'year') return (b.year || 0) - (a.year || 0);
@@ -352,17 +419,29 @@
   function libGrid() {
     var list = libFiltered();
     if (!list.length) return '<div class="empty"><span class="h3 display">Aucun titre ne correspond</span><span>Change les filtres ou ajoute un titre avec « J\'ai vu… ».</span></div>';
-    return '<p class="label" style="margin:0 0 14px">' + plural(list.length, 'titre', 'titres') + '</p><div class="posters">' + list.map(function (e) {
-      var tag = e.media_type === 'movie' ? 'Film' : (e.status === 'en_cours' ? 'En cours' : e.status === 'abandonne' ? 'Abandonnée' : 'Série');
-      var last = lastActivity(e);
-      return tile(e, tag, last ? fmtShort(last) + '.' + last.slice(2, 4) : (e.year || ''));
+    var f = state.ui.lib, sagaNote = '';
+    if (f.saga) {
+      var s = list.map(sagaOf)[0];
+      var seen = list.filter(hasActivity).length;
+      sagaNote = '<p class="note" style="margin:0 0 14px">Saga ' + esc(s ? s.label : '') + ' : ' + seen + ' vu' + (seen > 1 ? 's' : '') + ' sur ' + list.length + ' dans ton journal. ' +
+        'Ouvre un des films pour voir toute la saga.</p>';
+    }
+    return sagaNote + '<p class="label" style="margin:0 0 14px">' + plural(list.length, 'titre', 'titres') + '</p><div class="posters">' + list.map(function (e) {
+      var tag = e.media_type === 'movie' ? (f.saga && sagaOf(e).order ? 'N° ' + sagaOf(e).order : 'Film')
+        : (e.status === 'en_cours' ? 'En cours' : e.status === 'abandonne' ? 'Abandonnée' : 'Série');
+      var last = lastRec(e);
+      return tile(e, tag, last ? recShort(last) + (last.date ? '.' + last.date.slice(2, 4) : '') : (e.year || ''));
     }).join('') + '</div>';
   }
   function viewLibrary() {
     var f = state.ui.lib;
-    var genres = {};
-    state.entries.forEach(function (e) { e.genres.forEach(function (g) { genres[g] = 1; }); });
+    var genres = {}, sagas = {};
+    state.entries.forEach(function (e) {
+      e.genres.forEach(function (g) { genres[g] = 1; });
+      var s = sagaOf(e); if (s) sagas[s.id] = s.label;
+    });
     function opt(v, label, cur) { return '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(label) + '</option>'; }
+    var sagaIds = Object.keys(sagas).sort(function (a, b) { return sagas[a].localeCompare(sagas[b], 'fr'); });
     return '<div class="stack"><div class="section"><span class="eyebrow">.Tout ce que tu as vu</span><h1 class="h1 display">.Vidéo&shy;thèque</h1></div>' +
       '<div class="filters">' +
       '<div class="field"><label class="label" for="lib-type">Type</label><select id="lib-type" data-lib="type">' +
@@ -372,6 +451,8 @@
       opt('abandonne', 'Abandonnés', f.status) + opt('all', 'Tout, même À voir', f.status) + '</select></div>' +
       '<div class="field"><label class="label" for="lib-genre">Genre</label><select id="lib-genre" data-lib="genre">' + opt('', 'Tous les genres', f.genre) +
       Object.keys(genres).sort(function (a, b) { return a.localeCompare(b, 'fr'); }).map(function (g) { return opt(g, g, f.genre); }).join('') + '</select></div>' +
+      '<div class="field"><label class="label" for="lib-saga">Saga</label><select id="lib-saga" data-lib="saga">' + opt('', sagaIds.length ? 'Toutes les sagas' : 'Aucune saga pour l\'instant', f.saga) +
+      sagaIds.map(function (id) { return opt(id, sagas[id], f.saga); }).join('') + '</select></div>' +
       '<div class="field"><label class="label" for="lib-sort">Trier par</label><select id="lib-sort" data-lib="sort">' +
       opt('recent', 'Vus récemment', f.sort) + opt('note', 'Mieux notés', f.sort) + opt('title', 'Titre', f.sort) + opt('year', 'Année de sortie', f.sort) + '</select></div>' +
       '<div class="field field--grow"><label class="label" for="lib-q">Chercher dans ma vidéothèque</label><input id="lib-q" type="search" data-lib="q" value="' + esc(f.q) + '" placeholder="Titre ou réalisateur"></div>' +
@@ -387,7 +468,7 @@
         .filter(Boolean).join(' · ');
       return '<div class="row"><a class="row__main" href="#fiche-' + e.media_type + '-' + e.tmdb_id + '">' + poster(e, { thumb: true }) +
         '<span style="min-width:0;display:flex;flex-direction:column;gap:4px"><span class="row__title">' + esc(e.title) + '</span><span class="muted">' + esc(meta) + '</span></span></a>' +
-        '<div class="row__actions"><button type="button" class="btn btn--accent btn--small" data-act="seen-this" data-type="' + e.media_type + '" data-id="' + e.tmdb_id + '">J\'ai vu</button>' +
+        '<div class="row__actions"><button type="button" class="btn btn--accent btn--small" data-act="seen-this" data-type="' + e.media_type + '" data-id="' + e.tmdb_id + '">Je l\'ai vu</button>' +
         confirmBtn('entry:' + e.id, 'Retirer') + '</div></div>';
     }).join('') + '</div>'
       : '<div class="empty"><span class="h3 display">Ta liste est vide</span><span>Ajoute les films et séries que tu veux voir plus tard.</span></div>';
@@ -397,54 +478,83 @@
 
   /* ---------- Stats ---------- */
   function viewStats() {
-    var y = String(state.ui.statsYear);
+    var P = state.ui.statsYear; // une année, ou 'all'
+    var isAll = P === 'all';
+    function inP(r) { return isAll || recYear(r) === P; }
     var years = {};
-    years[new Date().getFullYear()] = 1;
-    var movieViews = [], epCount = 0, epMin = 0, active = {}, months = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    years[CUR_YEAR] = 1;
+    var movieViews = [], seasonsDone = 0, epMin = 0, active = {}, months = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], perYear = {};
     state.entries.forEach(function (e) {
       e.viewings.forEach(function (v) {
-        years[v.date.slice(0, 4)] = 1;
-        if (v.date.slice(0, 4) === y) { movieViews.push({ e: e, v: v }); active[e.id] = e; months[parseInt(v.date.slice(5, 7), 10) - 1]++; }
+        var y = recYear(v); if (y) years[y] = 1;
+        if (!inP(v)) return;
+        movieViews.push({ e: e, v: v });
+        active[e.id] = e;
+        var m = recMonth(v); if (m != null) months[m]++;
+        if (y) perYear[y] = (perYear[y] || 0) + 1;
       });
-      Object.keys(e.episodes).forEach(function (k) {
-        var d = e.episodes[k];
-        years[d.slice(0, 4)] = 1;
-        if (d.slice(0, 4) === y) { epCount++; epMin += e.ep_runtime || 45; active[e.id] = e; }
-      });
+      if (e.media_type === 'tv') {
+        sortedSeasons(e).forEach(function (s) {
+          var r = seasonRec(e, s.n);
+          if (!r) return;
+          var y = recYear(r); if (y) years[y] = 1;
+          if (!inP(r)) return;
+          active[e.id] = e;
+          if (r.st === 'vu') { seasonsDone++; epMin += (s.count || 0) * (e.ep_runtime || 45); }
+        });
+      }
     });
+    var undated = movieViews.filter(function (x) { return !x.v.date; }).length;
     var filmMin = movieViews.reduce(function (s, x) { return s + (x.e.runtime || 0); }, 0);
     var hours = Math.round((filmMin + epMin) / 60);
     var actives = Object.keys(active).map(function (k) { return active[k]; });
     var noted = actives.filter(function (e) { return e.notes.gen; });
     var avg = noted.length ? noted.reduce(function (s, e) { return s + e.notes.gen; }, 0) / noted.length : 0;
 
-    var yearOpts = Object.keys(years).sort().reverse().map(function (yy) {
-      return '<option value="' + yy + '"' + (yy === y ? ' selected' : '') + '>' + yy + '</option>';
-    }).join('');
-    var head = '<div class="section-head"><h1 class="h1 display">.Mon année <span style="color:var(--accent-text)">' + esc(y) + '</span></h1>' +
-      '<div class="field"><label class="label" for="stats-year">Année</label><select id="stats-year" data-change="stats-year">' + yearOpts + '</select></div></div>';
+    var yearOpts = '<option value="all"' + (isAll ? ' selected' : '') + '>Depuis le début</option>' +
+      Object.keys(years).map(Number).sort(function (a, b) { return b - a; }).map(function (yy) {
+        return '<option value="' + yy + '"' + (yy === P ? ' selected' : '') + '>' + yy + '</option>';
+      }).join('');
+    var head = '<div class="section-head"><h1 class="h1 display">' + (isAll ? '.Depuis le début' : '.Mon année <span style="color:var(--accent-text)">' + esc(P) + '</span>') + '</h1>' +
+      '<div class="field"><label class="label" for="stats-year">Période</label><select id="stats-year" data-change="stats-year">' + yearOpts + '</select></div></div>';
 
     if (!actives.length) {
-      return '<div class="stack">' + head + '<div class="empty"><span class="h3 display">Rien de vu en ' + esc(y) + '</span><span>Tes chiffres apparaîtront ici dès ton premier visionnage.</span></div></div>';
+      return '<div class="stack">' + head + '<div class="empty"><span class="h3 display">Rien de vu ' + (isAll ? 'pour l\'instant' : 'en ' + esc(P)) + '</span><span>Tes chiffres apparaîtront ici dès ton premier visionnage.</span></div></div>';
     }
 
     var kpis = '<div class="kpis">' +
       '<div class="kpi"><span class="label">Films vus</span><span class="kpi__v num">' + movieViews.length + '</span></div>' +
-      '<div class="kpi"><span class="label">Épisodes vus</span><span class="kpi__v num">' + epCount + '</span></div>' +
+      '<div class="kpi"><span class="label">Saisons vues</span><span class="kpi__v num">' + seasonsDone + '</span></div>' +
       '<div class="kpi"><span class="label">Devant l\'écran</span><span class="kpi__v num">≈ ' + hours + ' h</span></div>' +
-      '<div class="kpi kpi--accent"><span class="label">Note moyenne</span><span class="kpi__v num">' + (avg ? fmtNum(avg) : '–') + '</span></div></div>';
+      '<div class="kpi kpi--accent"><span class="label">Note moyenne</span><span class="kpi__v num">' + (avg ? fmtNum(avg) : '–') + '</span></div></div>' +
+      (undated ? '<p class="note">Dont ' + plural(undated, 'film', 'films') + ' sans date exacte' +
+        (isAll ? '.' : ', comptés dans l\'année que tu as indiquée ou, sinon, celle où tu les as enregistrés. Ils n\'apparaissent pas dans le graphique par mois.') + '</p>' : '');
 
-    var max = Math.max.apply(null, months.concat([1]));
-    var maxMonth = months.indexOf(max);
-    var curY = String(new Date().getFullYear()), curM = new Date().getMonth();
-    var monthsHTML = '<div class="months-wrap"><div class="months" role="img" aria-label="Films vus par mois en ' + esc(y) + ' : ' +
-      months.map(function (v, i) { return MONTHS_LONG[i] + ' ' + v; }).join(', ') + '">' +
-      months.map(function (v, i) {
-        var future = y === curY && i > curM;
-        return '<div class="month"><span class="month__v num">' + (future ? '' : v) + '</span>' +
-          '<span class="month__bar' + (v === max && v > 0 && i === maxMonth ? ' month__bar--top' : '') + '" style="height:' + (future ? 3 : Math.max(3, Math.round(v / max * 160))) + 'px' + (future ? ';background:var(--sand)' : '') + '"></span>' +
-          '<span class="label">' + MONTHS[i] + '</span></div>';
-      }).join('') + '</div></div>';
+    var chart;
+    if (isAll) {
+      var ys = Object.keys(perYear).map(Number).sort(function (a, b) { return a - b; });
+      var maxY = Math.max.apply(null, ys.map(function (y) { return perYear[y]; }).concat([1]));
+      chart = '<section class="panel"><div class="section-head"><h2 class="h2 display">.Films par année</h2></div>' +
+        (ys.length ? '<div class="months-wrap"><div class="months" style="grid-template-columns:repeat(' + ys.length + ', minmax(40px, 1fr));min-width:' + Math.max(300, ys.length * 52) + 'px" role="img" aria-label="Films vus par année : ' +
+          ys.map(function (y) { return y + ' ' + perYear[y]; }).join(', ') + '">' +
+          ys.map(function (y) {
+            return '<div class="month"><span class="month__v num">' + perYear[y] + '</span><span class="month__bar' + (perYear[y] === maxY ? ' month__bar--top' : '') + '" style="height:' + Math.max(3, Math.round(perYear[y] / maxY * 160)) + 'px"></span><span class="label">' + y + '</span></div>';
+          }).join('') + '</div></div>' : '<p class="muted">Pas encore de films.</p>') + '</section>';
+    } else {
+      var max = Math.max.apply(null, months.concat([1]));
+      var maxMonth = months.indexOf(max);
+      var curM = new Date().getMonth();
+      chart = '<section class="panel"><div class="section-head"><h2 class="h2 display">.Films par mois</h2>' +
+        (months.some(function (m) { return m > 0; }) ? '<span class="label">Record : ' + MONTHS_LONG[maxMonth] + ' (' + max + ')</span>' : '') + '</div>' +
+        '<div class="months-wrap"><div class="months" role="img" aria-label="Films vus par mois en ' + esc(P) + ' : ' +
+        months.map(function (v, i) { return MONTHS_LONG[i] + ' ' + v; }).join(', ') + '">' +
+        months.map(function (v, i) {
+          var future = P === CUR_YEAR && i > curM;
+          return '<div class="month"><span class="month__v num">' + (future ? '' : v) + '</span>' +
+            '<span class="month__bar' + (v === max && v > 0 && i === maxMonth ? ' month__bar--top' : '') + '" style="height:' + (future ? 3 : Math.max(3, Math.round(v / max * 160))) + 'px' + (future ? ';background:var(--sand)' : '') + '"></span>' +
+            '<span class="label">' + MONTHS[i] + '</span></div>';
+        }).join('') + '</div></div></section>';
+    }
 
     var genres = {};
     actives.forEach(function (e) { e.genres.forEach(function (g) { genres[g] = (genres[g] || 0) + 1; }); });
@@ -458,13 +568,13 @@
     var lieux = {};
     movieViews.forEach(function (x) { var l = x.v.lieu || 'Autre'; lieux[l] = (lieux[l] || 0) + 1; });
     var lieuList = LIEUX.concat(['Autre']).filter(function (l) { return lieux[l]; });
+    var colors = ['var(--accent)', 'var(--fg)', 'var(--sand)', 'var(--soft)', 'var(--paper)'];
     var splitHTML = movieViews.length ? '<div class="split" aria-hidden="true">' + lieuList.map(function (l) {
       return '<span style="width:' + (lieux[l] / movieViews.length * 100) + '%"></span>';
     }).join('') + '</div><ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px">' +
       lieuList.map(function (l, i) {
-        var colors = ['var(--accent)', 'var(--fg)', 'var(--sand)', 'var(--soft)', 'var(--paper)'];
         return '<li class="stat-line"><span><span class="dot" style="background:' + colors[i] + '"></span>' + esc(l) + '</span><span class="num">' + lieux[l] + '</span></li>';
-      }).join('') + '</ul>' : '<span class="muted">Aucun film vu cette année.</span>';
+      }).join('') + '</ul>' : '<span class="muted">Aucun film vu sur cette période.</span>';
 
     var dirs = {};
     movieViews.forEach(function (x) {
@@ -479,39 +589,55 @@
       return '<li class="stat-line" style="align-items:baseline"><span class="display" style="font-size:24px">' + esc(d[0]) + '</span><span class="num" style="font-weight:700;color:var(--nav-active)">' + plural(d[1], 'film', 'films') + '</span></li>';
     }).join('') || '<li>Pas encore de films.</li>';
 
-    return '<div class="stack">' + head + kpis +
-      '<section class="panel"><div class="section-head"><h2 class="h2 display">.Films par mois</h2>' +
-      (max > 0 && movieViews.length ? '<span class="label">Record : ' + MONTHS_LONG[maxMonth] + ' (' + max + ')</span>' : '') + '</div>' + monthsHTML + '</section>' +
+    return '<div class="stack">' + head + kpis + chart +
       '<div class="stat-cols">' +
       '<section class="stat-box"><h2 class="h3 display">.Genres</h2>' + genresHTML + '</section>' +
       '<section class="stat-box"><h2 class="h3 display">.Où je regarde mes films</h2>' + splitHTML + '</section>' +
       '<section class="stat-box stat-box--ink"><h2 class="h3 display">.Réalisateurs</h2><ol style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px">' + dirsHTML + '</ol>' +
-      '<span style="margin-top:auto">' + plural(rewatch, 'revisionnage', 'revisionnages') + ' cette année</span></section>' +
+      '<span style="margin-top:auto">' + plural(rewatch, 'revisionnage', 'revisionnages') + (isAll ? ' au total' : ' cette année') + '</span></section>' +
       '</div></div>';
   }
 
   /* ---------- Fiche ---------- */
+  function isManualId(id) { return Number(id) < 0; }
+  function newManualId() { return -(Math.floor(Math.random() * 2000000000) + 1); }
+
   function loadDetail(type, id) {
     var k = key(type, id);
     if (state.detailLoading[k]) return;
     state.detailLoading[k] = true;
     TMDB.details(type, id).then(function (d) {
       state.details[k] = d;
-      if (!d.recommendations) {
-        TMDB.recommend(d).then(function (list) { d.recommendations = list || []; render(); });
+      if (!d.recoGroups) {
+        TMDB.recommend(d).then(function (groups) { d.recoGroups = groups || []; render(); });
       }
       var e = findEntry(type, id);
-      var seasonsChanged = e && type === 'tv' && d.seasons.length && JSON.stringify(e.seasons) !== JSON.stringify(d.seasons);
-      var posterMissing = e && !e.poster_path && d.poster_path;
-      if (seasonsChanged || posterMissing) {
-        refreshFromDetail(e, d);
-        persist(e).then(render).catch(function () {});
-      }
+      if (e && refreshFromDetail(e, d)) persist(e).then(render).catch(function () {});
       render();
     }).catch(function (err) {
       state.detailErr[k] = err && err.message ? err.message : String(err);
       render();
     }).then(function () { state.detailLoading[k] = false; });
+  }
+
+  function recoGroupsFor(type, id, d, info) {
+    var groups = d && d.recoGroups ? d.recoGroups.map(function (g) { return { key: g.key, title: g.title, items: (g.items || []).slice(0, 6) }; }) : [];
+    var myGenres = info.genres || [];
+    if (myGenres.length) {
+      var genreGroup = groups.filter(function (g) { return g.key === 'genre'; })[0];
+      if (!genreGroup) { genreGroup = { key: 'genre', title: 'Du même genre · ' + myGenres[0], items: [] }; groups.push(genreGroup); }
+      var taken = {};
+      groups.forEach(function (g) { g.items.forEach(function (r) { taken[r.media_type + r.tmdb_id] = 1; }); });
+      // Les titres de ta liste À voir passent en premier
+      var mine = state.entries.filter(function (x) {
+        return x.status === 'a_voir' && !(x.media_type === type && String(x.tmdb_id) === String(id)) && !taken[x.media_type + x.tmdb_id] &&
+          x.genres.some(function (g) { return myGenres.indexOf(g) !== -1; });
+      }).slice(0, 3).map(function (x) {
+        return { tmdb_id: x.tmdb_id, media_type: x.media_type, title: x.title, year: x.year, fromList: true };
+      });
+      genreGroup.items = mine.concat(genreGroup.items).slice(0, 6);
+    }
+    return groups.filter(function (g) { return g.items.length; });
   }
 
   function viewFiche(type, id) {
@@ -530,14 +656,22 @@
     }
     var isTv = type === 'tv';
     var act = hasActivity(e);
+    var saga = (d && d.saga) || sagaOf(e);
+    var seasonsList = (d && d.seasons && d.seasons.length) ? d.seasons : (e ? e.seasons : []);
     var meta = [isTv ? 'Série' : 'Film', info.year, (info.genres || []).slice(0, 2).join(', '),
-      isTv ? plural((info.seasons || []).length, 'saison', 'saisons') : fmtDur(info.runtime)].filter(Boolean).join(' · ');
+      isTv ? plural(seasonsList.length, 'saison', 'saisons') : fmtDur(info.runtime)].filter(Boolean).join(' · ');
 
+    /* Colonne de gauche : affiche et actions */
     var shown = Object.assign({}, info, { poster_path: (e && e.poster_path) || info.poster_path });
-    var side = '<aside class="fiche__side">' + poster(shown) + '<div class="side-actions">' +
-      '<button type="button" class="btn btn--accent" data-act="seen-this" data-type="' + type + '" data-id="' + esc(id) + '">' + (isTv ? 'J\'ai vu des épisodes' : 'J\'ai vu ce film') + '</button>';
-    if (!e) side += '<button type="button" class="btn" data-act="add-towatch" data-type="' + type + '" data-id="' + esc(id) + '">+ À voir</button>';
-    else if (!act) side += '<span class="tag" style="align-self:flex-start;border:2px solid var(--line)">Dans ta liste À voir</span>' + confirmBtn('entry:' + e.id, 'Retirer de À voir');
+    var side = '<aside class="fiche__side">' + poster(shown) + '<div class="side-actions">';
+    if (act) {
+      side += '<span class="in-lib">' + ICON.check + 'Dans ta vidéothèque</span>';
+      side += '<button type="button" class="btn btn--accent" data-act="seen-this" data-type="' + type + '" data-id="' + esc(id) + '">' + (isTv ? 'Mettre à jour mes saisons' : 'Je l\'ai revu') + '</button>';
+    } else {
+      side += '<button type="button" class="btn btn--accent" data-act="seen-this" data-type="' + type + '" data-id="' + esc(id) + '">Ajouter à ma vidéothèque</button>';
+      if (!e) side += '<button type="button" class="btn" data-act="add-towatch" data-type="' + type + '" data-id="' + esc(id) + '">+ À voir</button>';
+      else side += '<span class="tag" style="align-self:flex-start;border:2px solid var(--line)">Dans ta liste À voir</span>' + confirmBtn('entry:' + e.id, 'Retirer de À voir');
+    }
     if (isTv && e && act && e.status !== 'vu') {
       side += '<button type="button" class="btn" data-act="abandon" data-id="' + esc(e.id) + '">' + (e.status === 'abandonne' ? 'Reprendre la série' : 'J\'abandonne') + '</button>';
     }
@@ -545,26 +679,29 @@
     if (e) side += '<button type="button" class="linkish" data-act="edit-poster" data-id="' + esc(e.id) + '">' + (e.poster_path ? 'Changer l\'affiche' : 'Ajouter une affiche') + '</button>';
     side += '</div></aside>';
 
+    /* En-tête */
     var main = '<div class="section"><span class="label">' + esc(meta) + (e ? ' · ' + esc(STATUS_LABEL[e.status]) : '') + (manual ? ' · Ajouté à la main' : '') + '</span>' +
       '<h1 class="fiche__title display">.' + esc(info.title) + '</h1>' +
       (info.director ? '<span>' + (isTv ? 'Créée par ' : 'Réalisé par ') + '<b>' + esc(info.director) + '</b></span>' : '') +
+      (saga && !isTv ? '<span>Saga <b>' + esc(saga.label) + '</b>' + (saga.order ? ' · film n° ' + esc(saga.order) : '') + '</span>' : '') +
       (d && d.overview ? '<p class="overview">' + esc(d.overview) + '</p>' : '') +
       '<span>' + googleLink(info.title + (info.year ? ' ' + info.year : ''), type) + '</span></div>';
 
+    /* Faits, notes, avis */
     if (e && act) {
       if (!isTv) {
-        var vs = e.viewings.slice().sort(function (a, b) { return b.date.localeCompare(a.date); });
+        var vs = e.viewings.slice().sort(function (a, b) { return recKey(b).localeCompare(recKey(a)); });
         var last = vs[0];
         main += '<div class="facts">' +
-          '<div><span class="label">Vu le</span><span>' + esc(fmtDate(last.date)) + '</span></div>' +
+          '<div><span class="label">Vu le</span><span>' + esc(last.date ? fmtDate(last.date) : last.year ? 'En ' + last.year : 'Je ne sais plus') + '</span></div>' +
           '<div><span class="label">Où</span><span>' + esc(last.lieu) + ' · ' + esc(last.version) + '</span></div>' +
           '<div><span class="label">Avec</span><span>' + esc(last.avec || 'Seul·e') + '</span></div>' +
           '<div><span class="label">Visionnages</span><span>' + (vs.length === 1 ? '1re fois' : vs.length + ' fois') + '</span></div></div>';
       } else {
-        var tot = totalEps(e), seen = seenEps(e);
+        var lr = lastRec(e);
         main += '<div class="facts">' +
-          '<div><span class="label">Progression</span><span class="num">' + seen + ' / ' + tot + ' épisodes</span></div>' +
-          '<div><span class="label">Dernier épisode</span><span>' + esc(fmtDate(lastEpDate(e))) + '</span></div>' +
+          '<div><span class="label">Progression</span><span class="num">' + seasonsSeen(e) + ' / ' + plural(sortedSeasons(e).length, 'saison vue', 'saisons vues') + '</span></div>' +
+          '<div><span class="label">Dernière mise à jour</span><span>' + esc(lr ? (lr.date ? fmtDate(lr.date) : lr.year ? 'En ' + lr.year : 'Date inconnue') : '') + '</span></div>' +
           '<div><span class="label">Statut</span><span>' + esc(STATUS_LABEL[e.status]) + '</span></div></div>';
       }
 
@@ -584,84 +721,69 @@
         }
       }
       main += notes + '</section>';
-    } else if (!e || !act) {
-      main += '<div class="empty"><span class="h3 display">' + (isTv ? 'Pas encore d\'épisode vu' : 'Pas encore vu') + '</span>' +
-        '<span>Ajoute un visionnage pour pouvoir le noter et écrire ton avis.</span></div>';
-    }
 
-    if (e && act) {
       main += '<section class="section field"><label class="h2 display" for="avis">.Mon avis</label>' +
         '<textarea id="avis" data-input="avis" data-id="' + esc(e.id) + '" rows="4" placeholder="Ce que tu en as pensé, une scène, une réplique…">' + esc(e.avis) + '</textarea>' +
         '<span class="saved" id="avis-state" role="status">Privé : visible par toi seul.</span></section>';
+    } else {
+      main += '<div class="empty"><span class="h3 display">Pas encore dans ta vidéothèque</span>' +
+        '<span>Ajoute-le avec le bouton rouge pour le noter et écrire ton avis.</span></div>';
     }
 
-    var seasonsSrc = (d && d.seasons && d.seasons.length) ? d.seasons : (e ? e.seasons : []);
-    if (isTv && seasonsSrc.length) {
+    /* Saisons */
+    if (isTv && seasonsList.length) {
       var ent = e || newEntry(info);
-      if (!ent.seasons.length) ent.seasons = seasonsSrc.slice();
-      var ss = seasonsSrc.slice().sort(function (a, b) { return a.n - b.n; });
-      var n = nextEp(ent);
-      var sel = state.ui.season[k] || (n ? n.s : ss[0].n);
-      var cur = ss.filter(function (s) { return s.n === sel; })[0] || ss[0];
-      var totE = totalEps(ent), seenE = seenEps(ent);
-      var allSeen = true;
-      for (var i = 1; i <= cur.count; i++) if (!ent.episodes[cur.n + '-' + i]) allSeen = false;
-      var epsHTML = '';
-      for (var j = 1; j <= cur.count; j++) {
-        var date = ent.episodes[cur.n + '-' + j];
-        var isNext = n && n.s === cur.n && n.e === j;
-        epsHTML += '<li><button type="button" class="ep' + (isNext ? ' ep--next' : '') + '" data-act="ep" data-type="tv" data-id="' + esc(id) + '" data-s="' + cur.n + '" data-e="' + j + '" aria-pressed="' + !!date + '"' +
-          ' aria-label="Saison ' + cur.n + ', épisode ' + j + (date ? ', vu le ' + fmtDate(date) : '') + '">' +
-          '<span>É' + j + '</span><span style="font-size:12px">' + (date ? fmtShort(date) : (isNext ? 'à suivre' : '')) + '</span></button></li>';
-      }
-      main += '<section class="section"><div class="section-head"><h2 class="h2 display">.Épisodes</h2><span class="label num">' + seenE + ' / ' + totE + ' vus</span></div>' +
-        '<span class="bar"><span style="width:' + (totE ? Math.round(seenE / totE * 100) : 0) + '%"></span></span>' +
-        (n ? '<span><button type="button" class="btn btn--accent" data-act="next-ep" data-type="tv" data-id="' + esc(id) + '">J\'ai vu S' + n.s + ' · É' + n.e + '</button></span>' : '<p style="margin:0" class="label">Série terminée</p>') +
-        '<div class="tabs" role="tablist" aria-label="Saisons">' + ss.map(function (s) {
-          return '<button type="button" role="tab" aria-selected="' + (s.n === cur.n) + '" data-act="season" data-k="' + k + '" data-s="' + s.n + '">Saison ' + s.n + '</button>';
+      if (!ent.seasons.length) ent.seasons = seasonsList.slice();
+      var ss = sortedSeasons(ent);
+      var n = nextSeason(ent);
+      var seenS = seasonsSeen(ent);
+      main += '<section class="section"><div class="section-head"><h2 class="h2 display">.Saisons</h2><span class="label num">' + seenS + ' / ' + ss.length + ' vues</span></div>' +
+        '<span class="bar"><span style="width:' + (ss.length ? Math.round(seenS / ss.length * 100) : 0) + '%"></span></span>' +
+        (n ? '<span><button type="button" class="btn btn--accent" data-act="season-done" data-type="tv" data-tid="' + esc(id) + '" data-s="' + n.n + '">J\'ai fini la saison ' + n.n + '</button></span>' : '<p style="margin:0" class="label">Série terminée</p>') +
+        '<div class="seasons">' + ss.map(function (s) {
+          var st = seasonState(ent, s.n), r = seasonRec(ent, s.n);
+          function b(val, label, accent) {
+            return '<button type="button"' + (accent ? ' class="seg--accent"' : '') + ' data-act="season-set" data-tid="' + esc(id) + '" data-s="' + s.n + '" data-st="' + val + '" aria-pressed="' + (st === val) + '">' + label + '</button>';
+          }
+          return '<div class="season-row"><span style="display:flex;flex-direction:column;gap:4px"><span class="season-row__name">Saison ' + s.n + '</span>' +
+            '<span class="muted" style="font-size:14px">' + plural(s.count, 'épisode', 'épisodes') + (r ? ' · ' + esc(st === 'vu' ? 'vue' : 'commencée') + ' ' + esc(r.date ? 'le ' + fmtDate(r.date) : r.year ? 'en ' + r.year : '') : '') + '</span></span>' +
+            '<div class="seg" role="group" aria-label="Saison ' + s.n + '">' + b('', 'Pas vue') + b('en_cours', 'En cours') + b('vu', 'Vue', true) + '</div></div>';
         }).join('') + '</div>' +
-        '<ul class="eps">' + epsHTML + '</ul>' +
-        '<span><button type="button" class="chip" data-act="season-all" data-type="tv" data-id="' + esc(id) + '" data-s="' + cur.n + '">' + (allSeen ? 'Décocher la saison ' + cur.n : 'Toute la saison ' + cur.n + ' est vue') + '</button></span></section>';
+        '<span><button type="button" class="chip" data-act="series-all" data-tid="' + esc(id) + '">' + (seenS === ss.length ? 'Tout remettre à « Pas vue »' : 'J\'ai vu toutes les saisons') + '</button></span></section>';
     }
 
+    /* Historique des visionnages */
     if (e && !isTv && e.viewings.length) {
       main += '<section class="section"><h2 class="h2 display">.Mes visionnages</h2><ul class="history">' +
-        e.viewings.slice().sort(function (a, b) { return b.date.localeCompare(a.date); }).map(function (v) {
-          return '<li><span><b>' + esc(fmtDate(v.date)) + '</b> · ' + esc(v.lieu) + ' · ' + esc(v.version) + (v.avec ? ' · avec ' + esc(v.avec) : '') + (v.rewatch ? ' · revisionnage' : '') + '</span>' +
+        e.viewings.slice().sort(function (a, b) { return recKey(b).localeCompare(recKey(a)); }).map(function (v) {
+          return '<li><span><b>' + esc(recLabel(v)) + '</b> · ' + esc(v.lieu) + ' · ' + esc(v.version) + (v.avec ? ' · avec ' + esc(v.avec) : '') + (v.rewatch ? ' · revisionnage' : '') + '</span>' +
             confirmBtn('viewing:' + e.id + ':' + v.id, 'Supprimer') + '</li>';
         }).join('') + '</ul></section>';
     }
 
-    var recoLoading = !!(d && d.recommendations === null);
-    var recos = ((d && d.recommendations) || []).slice(0, 6);
-    // Compléter avec les titres de la liste À voir qui partagent un genre
-    var myGenres = info.genres || [];
-    if (recos.length < 6 && myGenres.length) {
-      state.entries.filter(function (x) {
-        return x.status === 'a_voir' && !(x.media_type === type && String(x.tmdb_id) === String(id)) &&
-          x.genres.some(function (g) { return myGenres.indexOf(g) !== -1; }) &&
-          !recos.some(function (r) { return r.media_type === x.media_type && String(r.tmdb_id) === String(x.tmdb_id); });
-      }).slice(0, 6 - recos.length).forEach(function (x) {
-        var common = x.genres.filter(function (g) { return myGenres.indexOf(g) !== -1; })[0];
-        recos.push({ tmdb_id: x.tmdb_id, media_type: x.media_type, title: x.title, year: x.year, reason: 'Dans ta liste · ' + common });
-      });
-    }
-    if (recos.length || recoLoading) {
+    /* Recommandations en rangées */
+    var groups = recoGroupsFor(type, id, d, info);
+    var recoLoading = !manual && d && !d.recoGroups;
+    if (groups.length || recoLoading) {
       main += '<section class="section"><h2 class="h2 display">.Si tu as aimé</h2>' +
         (recoLoading ? '<p class="label muted" style="margin:0">Recherche de titres proches…</p>' : '') +
-        (recos.length ? '<div class="recos">' + recos.map(function (r) {
-          var mine = findEntry(r.media_type, r.tmdb_id);
-          var status = mine ? (hasActivity(mine) ? 'déjà vu' : 'dans ta liste') : '';
-          return '<a class="reco" href="#fiche-' + r.media_type + '-' + r.tmdb_id + '">' +
-            (r.reason ? '<span class="label">' + esc(r.reason) + '</span>' : '') +
-            '<span class="display">' + esc(r.title) + '</span><span style="font-size:13px">' +
-            esc([r.media_type === 'tv' ? 'Série' : 'Film', r.year, r.reason && r.reason.indexOf('Dans ta liste') === 0 ? '' : status].filter(Boolean).join(' · ')) + '</span></a>';
-        }).join('') + '</div>' : '') + '</section>';
+        groups.map(function (g) {
+          return '<div class="reco-group"><h3 class="h3 display" style="margin:0;font-size:24px">.' + esc(g.title) + '</h3><div class="recos">' + g.items.map(function (r) {
+            var mineE = findEntry(r.media_type, r.tmdb_id);
+            var status = r.current ? 'tu es ici' : mineE ? (hasActivity(mineE) ? 'déjà vu' : 'dans ta liste') : '';
+            var tag = r.fromList ? 'Dans ta liste' : (g.key === 'saga' && r.order ? 'N° ' + r.order : '');
+            var inner = (tag ? '<span class="label">' + esc(tag) + '</span>' : '') +
+              '<span class="display">' + esc(r.title) + '</span><span style="font-size:13px">' +
+              esc([r.media_type === 'tv' ? 'Série' : 'Film', r.year, r.fromList ? '' : status].filter(Boolean).join(' · ')) + '</span>';
+            return r.current ? '<span class="reco reco--current" aria-current="page">' + inner + '</span>'
+              : '<a class="reco" href="#fiche-' + r.media_type + '-' + r.tmdb_id + '">' + inner + '</a>';
+          }).join('') + '</div></div>';
+        }).join('') + '</section>';
     }
 
     if (e && act) {
       main += '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding-top:8px;border-top:2px solid var(--line)"><span class="muted" style="font-size:14px">Retirer ce titre et tout son historique :</span>' +
-        confirmBtn('entry:' + e.id, 'Supprimer de mon journal') + '</div>';
+        confirmBtn('entry:' + e.id, 'Supprimer de ma vidéothèque') + '</div>';
     }
 
     return '<div class="fiche">' + side + '<div class="fiche__main">' + main + '</div></div>';
@@ -675,22 +797,19 @@
   }
   function closeModal() { state.modal = null; render(); }
 
-  /* Titres ajoutés à la main : identifiant négatif, jamais utilisé par TMDB */
-  function isManualId(id) { return Number(id) < 0; }
-  function newManualId() { return -(Math.floor(Math.random() * 2000000000) + 1); }
-
   function startForm(m, d) {
     var e = findEntry(d.media_type, d.tmdb_id);
+    if (e) refreshFromDetail(e, d);
     var ss = (d.seasons || []).slice().sort(function (a, b) { return a.n - b.n; });
-    var n = e ? nextEp(refreshFromDetail(e, d)) : (ss.length ? { s: ss[0].n, e: 1 } : null);
+    var n = e ? nextSeason(e) : null;
     m.detail = d;
     m.loading = false;
     m.step = 'form';
     m.err = '';
     m.form = {
-      when: 'today', date: todayISO(), lieu: 'Streaming', version: 'VO', avec: '',
+      when: 'today', date: todayISO(), year: '', lieu: 'Streaming', version: 'VO', avec: '',
       note: e && e.notes.gen ? e.notes.gen : 0, rewatch: !!(e && e.viewings.length),
-      season: n ? n.s : (ss[0] ? ss[0].n : 1), ep: n ? n.e : 1
+      season: n ? n.n : (ss[0] ? ss[0].n : 1), current: !!(n && n.st === 'en_cours')
     };
     render();
   }
@@ -701,7 +820,7 @@
     if (m.mode === 'search') { state.modal = null; go('fiche-' + type + '-' + id); return; }
     if (isManualId(id)) {
       var me = findEntry(type, id);
-      if (me) startForm(m, Object.assign({ overview: '', recommendations: [] }, me));
+      if (me) startForm(m, Object.assign({ overview: '' }, me));
       return;
     }
     m.loading = true;
@@ -725,35 +844,185 @@
     var g = googleLink(m.q);
     var manualBtn = '<span style="display:flex;flex-wrap:wrap;gap:4px 20px;align-items:center">' +
       '<button type="button" class="linkish" data-act="m-manual">Il n\'est pas dans la liste ? Ajoute-le à la main</button>' + g + '</span>';
-    var demoNote = '';
     if (m.loading) return '<p class="label">Recherche…</p>';
     if (m.err) return '<p class="msg msg--err">' + esc(m.err) + '</p>' + manualBtn;
     if (!m.q.trim()) {
-      return '<div style="display:flex;flex-direction:column;gap:12px">' +
-        '<p class="muted" style="margin:0">' + esc(TMDB.hint()) + '</p>' + manualBtn + '</div>';
+      return '<div style="display:flex;flex-direction:column;gap:12px"><p class="muted" style="margin:0">' + esc(TMDB.hint()) + '</p>' + manualBtn + '</div>';
     }
     var q = m.q.trim().toLowerCase();
     var local = state.entries.filter(function (e) { return isManualId(e.tmdb_id) && e.title.toLowerCase().indexOf(q) !== -1; })
-      .map(function (e) { return { tmdb_id: e.tmdb_id, media_type: e.media_type, title: e.title, year: e.year, poster_path: null }; });
+      .map(function (e) { return { tmdb_id: e.tmdb_id, media_type: e.media_type, title: e.title, year: e.year, poster_path: e.poster_path }; });
     var all = local.concat(m.results);
     if (!all.length) {
-      return '<div style="display:flex;flex-direction:column;gap:12px">' + demoNote + '<p style="margin:0">Aucun résultat pour « ' + esc(m.q) + ' ».</p>' +
+      return '<div style="display:flex;flex-direction:column;gap:12px"><p style="margin:0">Aucun résultat pour « ' + esc(m.q) + ' ».</p>' +
         '<span style="display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center"><button type="button" class="btn btn--ink" data-act="m-manual">Ajouter « ' + esc(m.q.trim()) + ' » à la main</button>' + g + '</span></div>';
     }
-    return demoNote + '<ul class="results" style="margin-top:' + (demoNote ? '12px' : '0') + '">' + all.map(function (r) {
+    return '<ul class="results">' + all.map(function (r) {
       var mine = findEntry(r.media_type, r.tmdb_id);
-      return '<li><button type="button" class="result" data-act="m-pick" data-type="' + r.media_type + '" data-id="' + r.tmdb_id + '">' + poster(r, { thumb: true }) +
+      var inLib = hasActivity(mine);
+      var main = '<button type="button" class="result" data-act="m-pick" data-type="' + r.media_type + '" data-id="' + r.tmdb_id + '">' + poster(r, { thumb: true }) +
         '<span style="display:flex;flex-direction:column;gap:4px;min-width:0"><span class="result__title">' + esc(r.title) + '</span>' +
         '<span class="label">' + (r.media_type === 'tv' ? 'Série' : 'Film') + (r.year ? ' · ' + r.year : '') + (isManualId(r.tmdb_id) ? ' · ajouté à la main' : '') +
-        (mine ? ' · ' + (hasActivity(mine) ? 'déjà vu' : 'dans ta liste') : '') + '</span></span></button></li>';
+        (mine ? ' · ' + (inLib ? 'dans ta vidéothèque' : 'dans ta liste À voir') : '') + '</span></span></button>';
+      var quick = m.mode === 'search'
+        ? '<button type="button" class="quick" data-act="m-quickadd" data-type="' + r.media_type + '" data-id="' + r.tmdb_id + '" aria-label="Ajouter ' + esc(r.title) + ' à ma vidéothèque">' + (inLib ? 'Mettre à jour' : '+ Vidéo&shy;thèque') + '</button>' : '';
+      return '<li class="result-row">' + main + quick + '</li>';
     }).join('') + '</ul><div style="margin-top:12px">' + manualBtn + '</div>';
   }
 
-  function googleLink(q, kind) {
-    q = String(q || '').trim();
-    if (!q) return '';
-    var url = 'https://www.google.com/search?q=' + encodeURIComponent(q + (kind === 'tv' ? ' série' : kind === 'movie' ? ' film' : ''));
-    return '<a class="link" href="' + esc(url) + '" target="_blank" rel="noopener">Chercher « ' + esc(q) + ' » sur Google ↗</a>';
+  function chipGroup(field, options, cur, labelText) {
+    return '<div class="field"><span class="label" id="lbl-' + field + '">' + labelText + '</span><div class="chips" role="group" aria-labelledby="lbl-' + field + '">' +
+      options.map(function (o) {
+        var v = Array.isArray(o) ? o[0] : o, l = Array.isArray(o) ? o[1] : o;
+        return '<button type="button" class="chip" data-act="m-set" data-f="' + field + '" data-v="' + esc(v) + '" aria-pressed="' + (cur === v) + '">' + esc(l) + '</button>';
+      }).join('') + '</div></div>';
+  }
+
+  function whenFields(f) {
+    var h = chipGroup('when', [['today', 'Aujourd\'hui'], ['yesterday', 'Hier'], ['other', 'Autre date'], ['unknown', 'Je ne sais plus']], f.when, 'Quand');
+    if (f.when === 'other') {
+      h += '<div class="field"><label class="label" for="m-date">Date</label><input id="m-date" type="date" max="' + todayISO() + '" value="' + esc(f.date) + '" data-input="m-date"></div>';
+    }
+    if (f.when === 'unknown') {
+      h += '<div class="field"><label class="label" for="m-year">Je me souviens de l\'année (facultatif)</label>' +
+        '<span class="year-pick"><input id="m-year" type="number" min="1900" max="' + CUR_YEAR + '" placeholder="ex. 2019" value="' + esc(f.year) + '" data-input="m-year"></span>' +
+        '<span class="note">Sans année, il comptera dans tes stats ' + CUR_YEAR + ', l\'année où tu l\'enregistres.</span></div>';
+    }
+    return h;
+  }
+
+  function viewModal() {
+    var m = state.modal;
+    if (m.mode === 'poster') return posterModalHTML();
+    var title = m.mode === 'edit' ? 'Modifier les infos' : m.step === 'manual' ? 'Ajout à la main' : m.mode === 'search' ? 'Rechercher' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'Ma vidéothèque';
+    var body = '', foot = '';
+    if (m.step === 'manual') {
+      body = manualHTML();
+    } else if (m.step === 'search') {
+      body = '<div class="field"><label class="label" for="m-q">Titre, réalisateur…</label><input id="m-q" type="search" autocomplete="off" data-input="m-q" value="' + esc(m.q) + '"></div>' +
+        '<div id="m-results">' + resultsHTML() + '</div>';
+    } else if (m.loading || !m.detail) {
+      body = '<p class="label">Chargement…</p>';
+    } else {
+      var d = m.detail, f = m.form, isTv = d.media_type === 'tv';
+      var e = findEntry(d.media_type, d.tmdb_id);
+      var already = hasActivity(e);
+      body = '<div class="picked">' + poster(Object.assign({}, d, { poster_path: (e && e.poster_path) || d.poster_path }), { thumb: true }) +
+        '<span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px"><span class="result__title">' + esc(d.title) + '</span>' +
+        '<span class="label">' + (isTv ? 'Série' : 'Film') + (d.year ? ' · ' + d.year : '') + (d.director ? ' · ' + esc(d.director) : '') + '</span></span>' +
+        '<button type="button" class="linkish" style="color:inherit" data-act="m-back">Changer</button></div>';
+      if (m.mode === 'towatch') {
+        body += e ? '<p class="msg">Ce titre est déjà dans ton journal' + (already ? ', dans ta vidéothèque.' : ', dans ta liste À voir.') + '</p>'
+          : '<p style="margin:0">Il apparaîtra dans ta liste À voir et sur ton journal.</p>';
+        foot = '<button type="button" class="btn" data-act="close-modal">Annuler</button>' + (e ? '' : '<button type="button" class="btn btn--accent" data-act="m-towatch">Ajouter à À voir</button>');
+      } else {
+        if (already) {
+          var lr = lastRec(e);
+          body += isTv
+            ? '<p class="msg"><b>Déjà dans ta vidéothèque</b> (' + seasonsSeen(e) + ' / ' + plural(sortedSeasons(e).length, 'saison vue', 'saisons vues') + '). Tu mets à jour ta progression.</p>'
+            : '<p class="msg"><b>Déjà dans ta vidéothèque</b> (vu ' + esc(lr && lr.date ? 'le ' + fmtDate(lr.date) : lr && lr.year ? 'en ' + lr.year : 'à une date inconnue') + '). Ce visionnage sera ajouté comme un revisionnage.</p>';
+        }
+        if (isTv) {
+          var ss = (d.seasons || []).slice().sort(function (a, b) { return a.n - b.n; });
+          if (!ss.length) body += '<p class="msg msg--err">Aucune saison connue pour cette série.</p>';
+          else {
+            body += '<div class="field"><label class="label" for="m-season">Jusqu\'à quelle saison ?</label>' +
+              '<select id="m-season" data-change="m-season" style="min-height:46px;border:2px solid var(--line);background:var(--paper);padding:0 10px">' +
+              ss.map(function (s) { return '<option value="' + s.n + '"' + (s.n === f.season ? ' selected' : '') + '>Saison ' + s.n + ' (' + plural(s.count, 'épisode', 'épisodes') + ')</option>'; }).join('') + '</select>' +
+              '<label class="check"><input id="m-current" type="checkbox" data-change="m-current"' + (f.current ? ' checked' : '') + '><span>Je suis en train de regarder cette saison</span></label>' +
+              '<span class="note">Les saisons d\'avant seront marquées comme vues.</span></div>';
+          }
+        }
+        body += whenFields(f);
+        if (!isTv) {
+          body += chipGroup('lieu', LIEUX, f.lieu, 'Où');
+          body += chipGroup('version', [['VO', 'VO'], ['VF', 'VF']], f.version, 'Version');
+          body += '<div class="field"><label class="label" for="m-avec">Avec qui (facultatif)</label><input id="m-avec" type="text" maxlength="80" data-input="m-avec" value="' + esc(f.avec) + '"></div>';
+        }
+        body += '<div class="field"><span class="label">' + (isTv ? 'Note de la série' : 'Note générale') + ' (facultatif)</span>' + cells('m-note', 'gen', f.note, 'Note', true) + '</div>';
+        if (!isTv && !already) {
+          body += '<label class="check"><input id="m-rewatch" type="checkbox" data-change="m-rewatch"' + (f.rewatch ? ' checked' : '') + '><span>Je l\'avais déjà vu avant (revisionnage)</span></label>';
+        }
+        foot = (e ? '' : '<button type="button" class="btn" data-act="m-towatch">Plutôt À voir</button>') +
+          '<button type="button" class="btn btn--accent" data-act="m-save"' + (isTv && !(d.seasons || []).length ? ' disabled' : '') + '>' + (already ? 'Enregistrer' : 'Ajouter à ma vidéothèque') + '</button>';
+      }
+    }
+    return '<div class="overlay" data-act="overlay"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="m-title">' +
+      '<div class="dialog__head"><span class="display" id="m-title">.' + esc(title) + '</span>' +
+      '<button type="button" class="icon-btn" data-act="close-modal" aria-label="Fermer">' + ICON.close + '</button></div>' +
+      '<div class="dialog__body">' + body + '</div>' + (foot ? '<div class="dialog__foot">' + foot + '</div>' : '') + '</div></div>';
+  }
+
+  function recFromForm(f) {
+    var today = todayISO();
+    if (f.when === 'unknown') {
+      var y = parseInt(f.year, 10);
+      return { date: null, year: y >= 1900 && y <= CUR_YEAR ? y : null, added: today };
+    }
+    var date = f.when === 'today' ? today : f.when === 'yesterday' ? yesterdayISO() : (f.date || today);
+    return { date: date, year: null, added: today };
+  }
+
+  function saveFromModal() {
+    var m = state.modal, d = m.detail, f = m.form;
+    var type = d.media_type;
+    if (f.when === 'unknown' && f.year !== '' && !(parseInt(f.year, 10) >= 1900 && parseInt(f.year, 10) <= CUR_YEAR)) {
+      toast('L\'année doit être entre 1900 et ' + CUR_YEAR + ', ou laisse le champ vide.', true);
+      return;
+    }
+    var e = findEntry(type, d.tmdb_id) || newEntry(d);
+    refreshFromDetail(e, d);
+    var rec = recFromForm(f);
+    if (type === 'movie') {
+      e.viewings = e.viewings.concat([Object.assign({ id: uid(), lieu: f.lieu, version: f.version, avec: f.avec.trim(), rewatch: !!(f.rewatch || e.viewings.length) }, rec)]);
+    } else {
+      e.episodes = Object.assign({}, e.episodes);
+      sortedSeasons(e).forEach(function (s) {
+        if (s.n > f.season) return;
+        var want = s.n < f.season ? 'vu' : (f.current ? 'en_cours' : 'vu');
+        var cur = seasonState(e, s.n);
+        if (cur === 'vu') return;          // une saison déjà vue reste vue
+        if (cur === want) return;
+        e.episodes['S' + s.n] = Object.assign({ st: want }, rec);
+      });
+      if (e.status === 'abandonne') e.status = 'en_cours';
+    }
+    if (f.note) e.notes = Object.assign({}, e.notes, { gen: f.note });
+    persist(e).then(function () {
+      state.modal = null;
+      toast('Enregistré dans ta vidéothèque');
+      go('fiche-' + type + '-' + d.tmdb_id);
+    }).catch(function () {});
+  }
+
+  /* ---------- Ajout à la main ---------- */
+  function manualHTML() {
+    var m = state.modal, mm = m.manual, isTv = mm.type === 'tv';
+    function field(k, label, type, extra) {
+      return '<div class="field"><label class="label" for="mf-' + k + '">' + label + '</label>' +
+        '<input id="mf-' + k + '" type="' + (type || 'text') + '" data-input="mf" data-k="' + k + '" value="' + esc(mm[k]) + '"' + (extra || '') + '></div>';
+    }
+    var h = '<form data-form="manual" novalidate style="display:flex;flex-direction:column;gap:16px">';
+    if (m.mode !== 'edit') {
+      h += '<div class="field"><span class="label" id="lbl-mf-type">Type</span><div class="chips" role="group" aria-labelledby="lbl-mf-type">' +
+        '<button type="button" class="chip" data-act="mf-type" data-v="movie" aria-pressed="' + !isTv + '">Film</button>' +
+        '<button type="button" class="chip" data-act="mf-type" data-v="tv" aria-pressed="' + isTv + '">Série</button></div></div>';
+    }
+    h += field('title', 'Titre', 'text', ' maxlength="200" required');
+    h += '<div style="display:flex;flex-wrap:wrap;gap:12px"><div style="flex:1 1 140px">' + field('year', 'Année de sortie', 'number', ' min="1880" max="2100"') + '</div>' +
+      '<div style="flex:1 1 180px">' + field('runtime', isTv ? 'Durée d\'un épisode (min)' : 'Durée (min)', 'number', ' min="1" max="999"') + '</div></div>';
+    if (isTv) {
+      h += field('eps', 'Nombre d\'épisodes par saison', 'text', ' placeholder="ex. 8, 10, 10"') +
+        '<span class="muted" style="font-size:14px;margin-top:-8px">Un nombre par saison, séparés par des virgules.</span>';
+    }
+    h += field('director', isTv ? 'Créée par' : 'Réalisé par', 'text', ' maxlength="200"');
+    h += field('genres', 'Genres', 'text', ' placeholder="ex. Drame, Comédie" maxlength="200"');
+    if (mm.title) h += '<span style="font-size:14px">Un doute sur l\'année ou la durée ? ' + googleLink(mm.title, mm.type) + '</span>';
+    if (m.err) h += '<p class="msg msg--err" role="alert" style="margin:0">' + esc(m.err) + '</p>';
+    h += '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end">' +
+      (m.mode === 'edit' ? '<button type="button" class="btn" data-act="close-modal">Annuler</button>' : '<button type="button" class="btn" data-act="m-back">Retour à la recherche</button>') +
+      '<button type="submit" class="btn btn--accent">' + (m.mode === 'edit' ? 'Enregistrer' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'Continuer') + '</button></div></form>';
+    return h;
   }
 
   /* ---------- Affiche choisie par l'utilisateur ---------- */
@@ -805,124 +1074,74 @@
     });
   }
 
-  function manualHTML() {
-    var m = state.modal, mm = m.manual, isTv = mm.type === 'tv';
-    function field(k, label, type, extra) {
-      return '<div class="field"><label class="label" for="mf-' + k + '">' + label + '</label>' +
-        '<input id="mf-' + k + '" type="' + (type || 'text') + '" data-input="mf" data-k="' + k + '" value="' + esc(mm[k]) + '"' + (extra || '') + '></div>';
+  /* ---------- Mon compte ---------- */
+  function accMsg(k) {
+    var a = state.ui.account;
+    return (a.msg[k] ? '<p class="msg" role="status" style="margin:0">' + esc(a.msg[k]) + '</p>' : '') +
+      (a.err[k] ? '<p class="msg msg--err" role="alert" style="margin:0">' + esc(a.err[k]) + '</p>' : '');
+  }
+  function viewAccount() {
+    var demo = store.demo;
+    var email = demo ? '' : (state.user && state.user.email) || '';
+    var nb = state.entries.length, seen = state.entries.filter(hasActivity).length;
+    var h = '<div class="stack"><div class="section"><span class="eyebrow">.' + esc(demo ? 'Mode démo' : email) + '</span><h1 class="h1 display">.Mon compte</h1></div>' +
+      (demo ? '<p class="msg" style="margin:0">En mode démo, il n\'y a pas de compte : l\'e-mail, le mot de passe et la suppression du compte s\'activent quand Supabase est configuré.</p>' : '') +
+      '<div class="account-grid">';
+
+    if (!demo) {
+      h += '<section class="panel"><h2 class="h3 display">.Adresse e-mail</h2><p class="note">Actuelle : <b>' + esc(email) + '</b></p>' +
+        '<form data-form="acc-email" novalidate><div class="field"><label class="label" for="acc-email">Nouvelle adresse</label><input id="acc-email" type="email" autocomplete="email"></div>' +
+        '<span><button type="submit" class="btn btn--small">Changer mon e-mail</button></span></form>' + accMsg('email') + '</section>';
+      h += '<section class="panel"><h2 class="h3 display">.Mot de passe</h2>' +
+        '<form data-form="acc-pw" novalidate><div class="field"><label class="label" for="acc-pw1">Nouveau mot de passe</label><input id="acc-pw1" type="password" minlength="6" autocomplete="new-password"></div>' +
+        '<div class="field"><label class="label" for="acc-pw2">Confirme-le</label><input id="acc-pw2" type="password" minlength="6" autocomplete="new-password"></div>' +
+        '<span><button type="submit" class="btn btn--small">Changer mon mot de passe</button></span></form>' + accMsg('pw') + '</section>';
     }
-    var h = '<form data-form="manual" novalidate style="display:flex;flex-direction:column;gap:16px">';
-    if (m.mode !== 'edit') {
-      h += '<div class="field"><span class="label" id="lbl-mf-type">Type</span><div class="chips" role="group" aria-labelledby="lbl-mf-type">' +
-        '<button type="button" class="chip" data-act="mf-type" data-v="movie" aria-pressed="' + !isTv + '">Film</button>' +
-        '<button type="button" class="chip" data-act="mf-type" data-v="tv" aria-pressed="' + isTv + '">Série</button></div></div>';
+
+    h += '<section class="panel"><h2 class="h3 display">.Objectif ' + CUR_YEAR + '</h2><p class="note">Nombre de films que tu veux voir cette année (' + filmsInYear(CUR_YEAR) + ' pour l\'instant).</p>' +
+      '<form data-form="acc-goal" novalidate><div class="field"><label class="label" for="acc-goal">Films</label><input id="acc-goal" type="number" min="1" max="999" value="' + (state.goal || '') + '" placeholder="ex. 52"></div>' +
+      '<span><button type="submit" class="btn btn--small">Enregistrer</button></span></form>' + accMsg('goal') + '</section>';
+
+    h += '<section class="panel"><h2 class="h3 display">.Exporter mes données</h2><p class="note">' + plural(nb, 'titre', 'titres') + ' dans ton journal, dont ' + seen + ' dans ta vidéothèque. Garde une copie de sauvegarde quand tu veux.</p>' +
+      '<span style="display:flex;flex-wrap:wrap;gap:10px"><button type="button" class="btn btn--small" data-act="export-json">Sauvegarde complète (JSON)</button>' +
+      '<button type="button" class="btn btn--small" data-act="export-csv">Tableur (CSV)</button></span>' + accMsg('export') + '</section>';
+
+    h += '<section class="panel panel--danger"><h2 class="h3 display">.Vider mon journal</h2><p class="note">Efface tous tes films, séries, notes et avis. Ton compte reste actif. C\'est définitif : pense à exporter avant.</p>' +
+      '<form data-form="acc-clear" novalidate><div class="field"><label class="label" for="acc-clear">Tape VIDER pour confirmer</label><input id="acc-clear" type="text" autocomplete="off"></div>' +
+      '<span><button type="submit" class="btn btn--small">Vider mon journal</button></span></form>' + accMsg('clear') + '</section>';
+
+    if (!demo) {
+      h += '<section class="panel panel--danger"><h2 class="h3 display">.Supprimer mon compte</h2><p class="note">Supprime ton compte et toutes tes données. C\'est définitif et immédiat.</p>' +
+        '<form data-form="acc-delete" novalidate><div class="field"><label class="label" for="acc-delete">Tape SUPPRIMER pour confirmer</label><input id="acc-delete" type="text" autocomplete="off"></div>' +
+        '<span><button type="submit" class="btn btn--small btn--accent">Supprimer mon compte</button></span></form>' + accMsg('delete') + '</section>';
+      h += '<section class="panel"><h2 class="h3 display">.Se déconnecter</h2><p class="note">Tes données restent enregistrées. Tu pourras te reconnecter sur n\'importe quel appareil.</p>' +
+        '<span><button type="button" class="btn btn--small btn--ink" data-act="logout">Me déconnecter</button></span></section>';
     }
-    h += field('title', 'Titre', 'text', ' maxlength="200" required');
-    h += '<div style="display:flex;flex-wrap:wrap;gap:12px"><div style="flex:1 1 140px">' + field('year', 'Année de sortie', 'number', ' min="1880" max="2100"') + '</div>' +
-      '<div style="flex:1 1 180px">' + field('runtime', isTv ? 'Durée d\'un épisode (min)' : 'Durée (min)', 'number', ' min="1" max="999"') + '</div></div>';
-    if (isTv) {
-      h += field('eps', 'Nombre d\'épisodes par saison', 'text', ' placeholder="ex. 8, 10, 10"') +
-        '<span class="muted" style="font-size:14px;margin-top:-8px">Un nombre par saison, séparés par des virgules.</span>';
-    }
-    h += field('director', isTv ? 'Créée par' : 'Réalisé par', 'text', ' maxlength="200"');
-    h += field('genres', 'Genres', 'text', ' placeholder="ex. Drame, Comédie" maxlength="200"');
-    if (mm.title) h += '<span style="font-size:14px">Un doute sur l\'année ou la durée ? ' + googleLink(mm.title, mm.type) + '</span>';
-    if (m.err) h += '<p class="msg msg--err" role="alert" style="margin:0">' + esc(m.err) + '</p>';
-    h += '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end">' +
-      (m.mode === 'edit' ? '<button type="button" class="btn" data-act="close-modal">Annuler</button>' : '<button type="button" class="btn" data-act="m-back">Retour à la recherche</button>') +
-      '<button type="submit" class="btn btn--accent">' + (m.mode === 'edit' ? 'Enregistrer' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'Continuer') + '</button></div></form>';
-    return h;
+    return h + '</div></div>';
   }
 
-  function chipGroup(field, options, cur, labelText) {
-    return '<div class="field"><span class="label" id="lbl-' + field + '">' + labelText + '</span><div class="chips" role="group" aria-labelledby="lbl-' + field + '">' +
-      options.map(function (o) {
-        var v = Array.isArray(o) ? o[0] : o, l = Array.isArray(o) ? o[1] : o;
-        return '<button type="button" class="chip" data-act="m-set" data-f="' + field + '" data-v="' + esc(v) + '" aria-pressed="' + (cur === v) + '">' + esc(l) + '</button>';
-      }).join('') + '</div></div>';
+  function download(name, text, type) {
+    var blob = new Blob([text], { type: type });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
-
-  function viewModal() {
-    var m = state.modal;
-    if (m.mode === 'poster') return posterModalHTML();
-    var title = m.mode === 'edit' ? 'Modifier les infos' : m.step === 'manual' ? 'Ajout à la main' : m.mode === 'search' ? 'Rechercher' : m.mode === 'towatch' ? 'Ajouter à À voir' : 'J\'ai vu…';
-    var body = '', foot = '';
-    if (m.step === 'manual') {
-      body = manualHTML();
-    } else if (m.step === 'search') {
-      body = '<div class="field"><label class="label" for="m-q">Titre, réalisateur…</label><input id="m-q" type="search" autocomplete="off" data-input="m-q" value="' + esc(m.q) + '"></div>' +
-        '<div id="m-results">' + resultsHTML() + '</div>';
-    } else if (m.loading || !m.detail) {
-      body = '<p class="label">Chargement…</p>';
-    } else {
-      var d = m.detail, f = m.form, isTv = d.media_type === 'tv';
-      var e = findEntry(d.media_type, d.tmdb_id);
-      body = '<div class="picked">' + poster(d, { thumb: true }) + '<span style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px"><span class="result__title">' + esc(d.title) + '</span>' +
-        '<span class="label">' + (isTv ? 'Série' : 'Film') + (d.year ? ' · ' + d.year : '') + (d.director ? ' · ' + esc(d.director) : '') + '</span></span>' +
-        '<button type="button" class="linkish" style="color:inherit" data-act="m-back">Changer</button></div>';
-      if (m.mode === 'towatch') {
-        body += e ? '<p class="msg">Ce titre est déjà dans ton journal.</p>' : '<p style="margin:0">Il apparaîtra dans ta liste À voir et sur ton journal.</p>';
-        foot = '<button type="button" class="btn" data-act="close-modal">Annuler</button>' + (e ? '' : '<button type="button" class="btn btn--accent" data-act="m-towatch">Ajouter à À voir</button>');
-      } else {
-        if (isTv) {
-          var ss = (d.seasons || []).slice().sort(function (a, b) { return a.n - b.n; });
-          var curS = ss.filter(function (s) { return s.n === f.season; })[0] || ss[0];
-          if (!ss.length) body += '<p class="msg msg--err">TMDB ne liste aucune saison pour cette série.</p>';
-          else {
-            var epOpts = '';
-            for (var i = 1; i <= curS.count; i++) epOpts += '<option value="' + i + '"' + (i === f.ep ? ' selected' : '') + '>Épisode ' + i + '</option>';
-            body += '<div class="field"><span class="label">Jusqu\'où tu en es</span><div class="ep-pick">' +
-              '<label class="sr-only" for="m-season">Saison</label><select id="m-season" data-change="m-season" style="min-height:46px;border:2px solid var(--line);background:var(--paper);padding:0 10px">' +
-              ss.map(function (s) { return '<option value="' + s.n + '"' + (s.n === curS.n ? ' selected' : '') + '>Saison ' + s.n + '</option>'; }).join('') + '</select>' +
-              '<label class="sr-only" for="m-ep">Épisode</label><select id="m-ep" data-change="m-ep" style="min-height:46px;border:2px solid var(--line);background:var(--paper);padding:0 10px">' + epOpts + '</select></div>' +
-              '<span class="muted" style="font-size:14px">Tous les épisodes jusqu\'à celui-ci seront cochés.</span></div>';
-          }
-        }
-        body += chipGroup('when', [['today', 'Aujourd\'hui'], ['yesterday', 'Hier'], ['other', 'Autre date']], f.when, 'Quand');
-        if (f.when === 'other') {
-          body += '<div class="field"><label class="label" for="m-date">Date</label><input id="m-date" type="date" max="' + todayISO() + '" value="' + esc(f.date) + '" data-input="m-date"></div>';
-        }
-        if (!isTv) {
-          body += chipGroup('lieu', LIEUX, f.lieu, 'Où');
-          body += chipGroup('version', [['VO', 'VO'], ['VF', 'VF']], f.version, 'Version');
-          body += '<div class="field"><label class="label" for="m-avec">Avec qui (facultatif)</label><input id="m-avec" type="text" maxlength="80" data-input="m-avec" value="' + esc(f.avec) + '"></div>';
-        }
-        body += '<div class="field"><span class="label">' + (isTv ? 'Note de la série' : 'Note générale') + ' (facultatif)</span>' + cells('m-note', 'gen', f.note, 'Note', true) + '</div>';
-        if (!isTv) {
-          body += '<label class="check"><input id="m-rewatch" type="checkbox" data-change="m-rewatch"' + (f.rewatch ? ' checked' : '') + '><span>C\'est un revisionnage</span></label>';
-        }
-        foot = (e ? '' : '<button type="button" class="btn" data-act="m-towatch">Plutôt À voir</button>') +
-          '<button type="button" class="btn btn--accent" data-act="m-save"' + (isTv && !(d.seasons || []).length ? ' disabled' : '') + '>Ajouter au journal</button>';
-      }
-    }
-    return '<div class="overlay" data-act="overlay"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="m-title">' +
-      '<div class="dialog__head"><span class="display" id="m-title">.' + esc(title) + '</span>' +
-      '<button type="button" class="icon-btn" data-act="close-modal" aria-label="Fermer">' + ICON.close + '</button></div>' +
-      '<div class="dialog__body">' + body + '</div>' + (foot ? '<div class="dialog__foot">' + foot + '</div>' : '') + '</div></div>';
+  function csvCell(v) {
+    var s = String(v == null ? '' : v);
+    return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
-
-  function saveFromModal() {
-    var m = state.modal, d = m.detail, f = m.form;
-    var type = d.media_type;
-    var e = findEntry(type, d.tmdb_id) || newEntry(d);
-    refreshFromDetail(e, d);
-    var date = f.when === 'today' ? todayISO() : f.when === 'yesterday' ? yesterdayISO() : (f.date || todayISO());
-    if (type === 'movie') {
-      e.viewings = e.viewings.concat([{ id: uid(), date: date, lieu: f.lieu, version: f.version, avec: f.avec.trim(), rewatch: !!(f.rewatch || e.viewings.length) }]);
-    } else {
-      sortedSeasons(e).forEach(function (s) {
-        if (s.n > f.season) return;
-        var last = s.n < f.season ? s.count : Math.min(f.ep, s.count);
-        for (var i = 1; i <= last; i++) if (!e.episodes[s.n + '-' + i]) e.episodes[s.n + '-' + i] = date;
-      });
-      if (e.status === 'abandonne') e.status = 'en_cours';
-    }
-    if (f.note) e.notes = Object.assign({}, e.notes, { gen: f.note });
-    persist(e).then(function () {
-      state.modal = null;
-      toast(type === 'movie' ? 'Ajouté à ton journal' : 'Épisodes enregistrés');
-      go('fiche-' + type + '-' + d.tmdb_id);
-    }).catch(function () {});
+  function exportCSV() {
+    var rows = [['Type', 'Titre', 'Année de sortie', 'Statut', 'Note', 'Réalisateur / créateur', 'Genres', 'Saga', 'Nombre de visionnages', 'Dernier visionnage', 'Saisons vues', 'Avis']];
+    state.entries.slice().sort(function (a, b) { return a.title.localeCompare(b.title, 'fr'); }).forEach(function (e) {
+      var lr = lastRec(e);
+      rows.push([e.media_type === 'tv' ? 'Série' : 'Film', e.title, e.year || '', STATUS_LABEL[e.status], e.notes.gen || '', e.director, e.genres.join(', '),
+        sagaOf(e) ? sagaOf(e).label : '', e.media_type === 'movie' ? e.viewings.length : '', lr ? (lr.date || (lr.year ? String(lr.year) : 'inconnue')) : '',
+        e.media_type === 'tv' ? seasonsSeen(e) + '/' + sortedSeasons(e).length : '', e.avis]);
+    });
+    return '﻿' + rows.map(function (r) { return r.map(csvCell).join(';'); }).join('\r\n');
   }
 
   /* ---------- Connexion ---------- */
@@ -954,8 +1173,9 @@
     var msg = (err && err.message) || String(err);
     if (/Invalid login credentials/i.test(msg)) return 'E-mail ou mot de passe incorrect.';
     if (/Email not confirmed/i.test(msg)) return 'Confirme d\'abord ton adresse avec le lien reçu par e-mail.';
-    if (/already registered/i.test(msg)) return 'Un compte existe déjà avec cet e-mail.';
+    if (/already registered|already been registered/i.test(msg)) return 'Un compte existe déjà avec cet e-mail.';
     if (/at least 6|Password should be/i.test(msg)) return 'Le mot de passe doit faire au moins 6 caractères.';
+    if (/different from the old/i.test(msg)) return 'Le nouveau mot de passe doit être différent de l\'ancien.';
     if (/rate limit/i.test(msg)) return 'Trop de tentatives. Réessaie dans quelques minutes.';
     return msg;
   }
@@ -966,7 +1186,7 @@
     try { h = decodeURIComponent(h); } catch (e) { /* lien mal formé */ }
     var m = h.match(/^fiche-(movie|tv)-(-?\d+)$/);
     if (m) return { name: 'fiche', type: m[1], id: m[2] };
-    if (['journal', 'videotheque', 'a-voir', 'stats'].indexOf(h) >= 0) return { name: h };
+    if (['journal', 'videotheque', 'a-voir', 'stats', 'compte'].indexOf(h) >= 0) return { name: h };
     return { name: 'journal' };
   }
   function go(h) {
@@ -974,7 +1194,7 @@
     else location.hash = h;
   }
 
-  var TITLES = { journal: 'Journal', videotheque: 'Vidéothèque', 'a-voir': 'À voir', stats: 'Stats' };
+  var TITLES = { journal: 'Journal', videotheque: 'Vidéothèque', 'a-voir': 'À voir', stats: 'Stats', compte: 'Mon compte' };
   function render() {
     if (!state.ready) { app.innerHTML = '<div class="wrap loading">Chargement…</div>'; return; }
     if (!store.demo && (!state.user || state.ui.recovery)) {
@@ -986,6 +1206,7 @@
     if (r.name === 'videotheque') body = viewLibrary();
     else if (r.name === 'a-voir') body = viewToWatch();
     else if (r.name === 'stats') body = viewStats();
+    else if (r.name === 'compte') body = viewAccount();
     else if (r.name === 'fiche') body = viewFiche(r.type, r.id);
     else body = viewJournal();
 
@@ -1002,7 +1223,7 @@
       state.modal.focus = false;
       var q = document.getElementById('m-q');
       if (q) q.focus();
-    } else if (active && document.getElementById(active) && active !== 'avis') {
+    } else if (active && document.getElementById(active) && active !== 'avis' && active !== 'pf-file') {
       document.getElementById(active).focus();
     }
   }
@@ -1011,6 +1232,7 @@
     state.route = parseRoute();
     state.ui.confirm = null;
     state.ui.tonight = null;
+    state.ui.account = { msg: {}, err: {} };
     render();
     window.scrollTo(0, 0);
   });
@@ -1030,7 +1252,21 @@
   }
 
   /* ---------- Actions ---------- */
-  function markEpisode(e, s, n, date) { e.episodes = Object.assign({}, e.episodes); e.episodes[s + '-' + n] = date || todayISO(); }
+  function setSeason(e, n, st) {
+    e.episodes = Object.assign({}, e.episodes);
+    if (!st) delete e.episodes['S' + n];
+    else {
+      var prev = e.episodes['S' + n];
+      var today = todayISO();
+      e.episodes['S' + n] = prev && prev.st === st ? prev : { st: st, date: today, year: null, added: today };
+    }
+    if (e.status === 'abandonne' && st) e.status = 'en_cours';
+  }
+  function accSet(k, msg, err) {
+    var a = state.ui.account;
+    a.msg[k] = msg || ''; a.err[k] = err || '';
+    render();
+  }
 
   var actions = {
     'open-search': function () { openModal('search'); },
@@ -1047,11 +1283,23 @@
       state.ui.editGoal = true; render();
       var i = document.getElementById('goal-in'); if (i) { i.focus(); i.select(); }
     },
-    'quick-ep': function (t) {
-      var e = findById(t.dataset.id); if (!e) return;
-      var n = nextEp(e); if (!n) return;
-      markEpisode(e, n.s, n.e);
-      persist(e).then(function () { toast('S' + n.s + ' · É' + n.e + ' vu'); render(); }).catch(function () {});
+    'season-done': function (t) {
+      var e = t.dataset.id ? findById(t.dataset.id) : entryFor('tv', t.dataset.tid);
+      if (!e) return;
+      var n = parseInt(t.dataset.s, 10);
+      setSeason(e, n, 'vu');
+      persist(e).then(function () { toast('Saison ' + n + ' vue'); render(); }).catch(function () {});
+    },
+    'season-set': function (t) {
+      var e = entryFor('tv', t.dataset.tid); if (!e) return;
+      setSeason(e, parseInt(t.dataset.s, 10), t.dataset.st);
+      persist(e).then(render).catch(function () {});
+    },
+    'series-all': function (t) {
+      var e = entryFor('tv', t.dataset.tid); if (!e) return;
+      var all = seasonsSeen(e) === sortedSeasons(e).length;
+      sortedSeasons(e).forEach(function (s) { setSeason(e, s.n, all ? '' : 'vu'); });
+      persist(e).then(render).catch(function () {});
     },
     'seen-this': function (t) { openModal('add', { type: t.dataset.type, id: t.dataset.id }); },
     'add-towatch': function (t) {
@@ -1087,41 +1335,13 @@
       render();
       persist(e).catch(function () {});
     },
-    'season': function (t) { state.ui.season[t.dataset.k] = parseInt(t.dataset.s, 10); render(); },
-    'ep': function (t) {
-      var e = entryFor('tv', t.dataset.id); if (!e) return;
-      var k = t.dataset.s + '-' + t.dataset.e;
-      e.episodes = Object.assign({}, e.episodes);
-      if (e.episodes[k]) delete e.episodes[k]; else e.episodes[k] = todayISO();
-      if (e.status === 'abandonne') e.status = 'en_cours';
-      persist(e).then(render).catch(function () {});
-    },
-    'next-ep': function (t) {
-      var e = entryFor('tv', t.dataset.id); if (!e) return;
-      var n = nextEp(e); if (!n) return;
-      markEpisode(e, n.s, n.e);
-      state.ui.season[key('tv', t.dataset.id)] = n.s;
-      persist(e).then(function () { toast('S' + n.s + ' · É' + n.e + ' vu'); render(); }).catch(function () {});
-    },
-    'season-all': function (t) {
-      var e = entryFor('tv', t.dataset.id); if (!e) return;
-      var s = parseInt(t.dataset.s, 10);
-      var season = sortedSeasons(e).filter(function (x) { return x.n === s; })[0]; if (!season) return;
-      var all = true, i;
-      for (i = 1; i <= season.count; i++) if (!e.episodes[s + '-' + i]) all = false;
-      e.episodes = Object.assign({}, e.episodes);
-      for (i = 1; i <= season.count; i++) {
-        if (all) delete e.episodes[s + '-' + i];
-        else if (!e.episodes[s + '-' + i]) e.episodes[s + '-' + i] = todayISO();
-      }
-      persist(e).then(render).catch(function () {});
-    },
     'abandon': function (t) {
       var e = findById(t.dataset.id); if (!e) return;
       e.status = e.status === 'abandonne' ? 'en_cours' : 'abandonne';
       persist(e).then(function (s) { toast(s.status === 'abandonne' ? 'Série marquée comme abandonnée' : 'Série reprise'); render(); }).catch(function () {});
     },
     'm-pick': function (t) { pick(t.dataset.type, t.dataset.id); },
+    'm-quickadd': function (t) { state.modal.mode = 'add'; pick(t.dataset.type, t.dataset.id); },
     'm-back': function () { var m = state.modal; m.step = 'search'; m.detail = null; m.focus = true; render(); },
     'm-set': function (t) { state.modal.form[t.dataset.f] = t.dataset.v; render(); },
     'm-note': function (t) { var f = state.modal.form, v = parseInt(t.dataset.v, 10); f.note = f.note === v ? 0 : v; render(); },
@@ -1133,23 +1353,13 @@
     },
     'm-manual': function () {
       var m = state.modal; if (!m) return;
+      if (m.mode === 'search') m.mode = 'add';
       m.step = 'manual'; m.err = '';
       m.manual = m.manual || { type: 'movie', title: m.q.trim(), year: '', runtime: '', eps: '', director: '', genres: '' };
       render();
       var t = document.getElementById(m.manual.title ? 'mf-year' : 'mf-title'); if (t) t.focus();
     },
     'mf-type': function (t) { state.modal.manual.type = t.dataset.v; render(); },
-    'edit-poster': function (t) {
-      var e = findById(t.dataset.id); if (!e) return;
-      state.modal = { mode: 'poster', step: 'poster', entryId: e.id, preview: e.poster_path || null, err: '', busy: false, focus: false };
-      render();
-    },
-    'pf-remove': function () { state.modal.preview = null; state.modal.err = ''; render(); },
-    'pf-save': function () {
-      var m = state.modal, e = findById(m.entryId); if (!e) { closeModal(); return; }
-      e.poster_path = m.preview || null;
-      persist(e).then(function () { state.modal = null; toast(e.poster_path ? 'Affiche enregistrée' : 'Affiche retirée'); render(); }).catch(function () {});
-    },
     'edit-manual': function (t) {
       var e = findById(t.dataset.id); if (!e) return;
       state.modal = {
@@ -1163,6 +1373,26 @@
       };
       render();
     },
+    'edit-poster': function (t) {
+      var e = findById(t.dataset.id); if (!e) return;
+      state.modal = { mode: 'poster', step: 'poster', entryId: e.id, preview: e.poster_path || null, err: '', busy: false, focus: false };
+      render();
+    },
+    'pf-remove': function () { state.modal.preview = null; state.modal.err = ''; render(); },
+    'pf-save': function () {
+      var m = state.modal, e = findById(m.entryId); if (!e) { closeModal(); return; }
+      e.poster_path = m.preview || null;
+      persist(e).then(function () { state.modal = null; toast(e.poster_path ? 'Affiche enregistrée' : 'Affiche retirée'); render(); }).catch(function () {});
+    },
+    'export-json': function () {
+      var data = { application: 'Séquence', exporte_le: new Date().toISOString(), objectif: { annee: CUR_YEAR, films: state.goal }, titres: state.entries };
+      download('sequence-sauvegarde-' + todayISO() + '.json', JSON.stringify(data, null, 2), 'application/json');
+      accSet('export', 'Fichier de sauvegarde téléchargé.');
+    },
+    'export-csv': function () {
+      download('sequence-' + todayISO() + '.csv', exportCSV(), 'text/csv;charset=utf-8');
+      accSet('export', 'Fichier tableur téléchargé. Il s\'ouvre avec Excel, Numbers ou Google Sheets.');
+    },
     'auth-mode': function (t) { state.ui.auth = { mode: t.dataset.v, msg: '', err: '', busy: false }; render(); }
   };
 
@@ -1170,8 +1400,7 @@
     goal: function (f) {
       var v = parseInt(f.querySelector('#goal-in').value, 10);
       if (!v || v < 1) { toast('Indique un nombre de films supérieur à 0', true); return; }
-      var y = new Date().getFullYear();
-      store.setGoal(y, v).then(function () { state.goal = v; state.ui.editGoal = false; render(); })
+      store.setGoal(CUR_YEAR, v).then(function () { state.goal = v; state.ui.editGoal = false; render(); })
         .catch(function (err) { toast('Objectif non enregistré : ' + (err.message || err), true); });
     },
     tonight: function (f) {
@@ -1210,19 +1439,60 @@
         Object.keys(fields).forEach(function (k) { e[k] = fields[k]; });
         if (isTv) {
           var valid = {};
-          seasons.forEach(function (s) { for (var i = 1; i <= s.count; i++) valid[s.n + '-' + i] = 1; });
+          seasons.forEach(function (s) { valid['S' + s.n] = 1; });
+          e.episodes = Object.assign({}, e.episodes);
           Object.keys(e.episodes).forEach(function (k) { if (!valid[k]) delete e.episodes[k]; });
         }
         persist(e).then(function () { state.modal = null; toast('Infos mises à jour'); render(); }).catch(function () {});
         return;
       }
-      var d = Object.assign({ tmdb_id: newManualId(), media_type: mm.type, poster_path: null, overview: '', recommendations: [] }, fields);
+      var d = Object.assign({ tmdb_id: newManualId(), media_type: mm.type, poster_path: null, overview: '' }, fields);
       if (m.mode === 'towatch') {
         persist(newEntry(d)).then(function () { state.modal = null; toast('Ajouté à À voir'); render(); }).catch(function () {});
         return;
       }
       m.mode = 'add';
       startForm(m, d);
+    },
+    'acc-email': function (f) {
+      var email = f.querySelector('#acc-email').value.trim();
+      if (!/^\S+@\S+\.\S+$/.test(email)) { accSet('email', '', 'Indique une adresse e-mail valide.'); return; }
+      store.updateEmail(email).then(function () {
+        accSet('email', 'Presque fini : ouvre le lien de confirmation envoyé par e-mail (vérifie aussi ton ancienne adresse). Le changement sera actif ensuite.');
+      }).catch(function (err) { accSet('email', '', authError(err)); });
+    },
+    'acc-pw': function (f) {
+      var p1 = f.querySelector('#acc-pw1').value, p2 = f.querySelector('#acc-pw2').value;
+      if (p1.length < 6) { accSet('pw', '', 'Le mot de passe doit faire au moins 6 caractères.'); return; }
+      if (p1 !== p2) { accSet('pw', '', 'Les deux mots de passe ne sont pas identiques.'); return; }
+      store.updatePassword(p1).then(function () { f.reset(); accSet('pw', 'Mot de passe changé.'); })
+        .catch(function (err) { accSet('pw', '', authError(err)); });
+    },
+    'acc-goal': function (f) {
+      var v = parseInt(f.querySelector('#acc-goal').value, 10);
+      if (!v || v < 1) { accSet('goal', '', 'Indique un nombre de films supérieur à 0.'); return; }
+      store.setGoal(CUR_YEAR, v).then(function () { state.goal = v; accSet('goal', 'Objectif enregistré : ' + v + ' films en ' + CUR_YEAR + '.'); })
+        .catch(function (err) { accSet('goal', '', 'Objectif non enregistré : ' + (err.message || err)); });
+    },
+    'acc-clear': function (f) {
+      if (f.querySelector('#acc-clear').value.trim().toUpperCase() !== 'VIDER') { accSet('clear', '', 'Tape VIDER dans le champ pour confirmer.'); return; }
+      store.deleteAll().then(function () {
+        state.entries = []; state.goal = null; state.details = {};
+        accSet('clear', 'Ton journal a été vidé.');
+      }).catch(function (err) { accSet('clear', '', 'Impossible de vider le journal : ' + (err.message || err)); });
+    },
+    'acc-delete': function (f) {
+      if (f.querySelector('#acc-delete').value.trim().toUpperCase() !== 'SUPPRIMER') { accSet('delete', '', 'Tape SUPPRIMER dans le champ pour confirmer.'); return; }
+      store.deleteAccount().then(function () {
+        state.ui.auth = { mode: 'login', msg: 'Ton compte et toutes tes données ont été supprimés.', err: '', busy: false };
+        render();
+      }).catch(function (err) {
+        var msg = (err && err.message) || String(err);
+        if (/delete_user|function|schema cache|does not exist/i.test(msg)) {
+          msg = 'La suppression de compte n\'est pas encore activée sur ce site : il faut coller le fichier supprimer-compte.sql dans Supabase (SQL Editor).';
+        }
+        accSet('delete', '', msg);
+      });
     },
     auth: function (f) {
       var a = state.ui.auth;
@@ -1277,6 +1547,7 @@
       }, 350);
     },
     'm-date': function (t) { state.modal.form.date = t.value; },
+    'm-year': function (t) { state.modal.form.year = t.value; },
     'm-avec': function (t) { state.modal.form.avec = t.value; },
     'mf': function (t) { if (state.modal && state.modal.manual) state.modal.manual[t.dataset.k] = t.value; }
   };
@@ -1288,6 +1559,10 @@
       e.per_season = t.checked; render();
       persist(e).catch(function () {});
     },
+    'stats-year': function (t) { state.ui.statsYear = t.value === 'all' ? 'all' : parseInt(t.value, 10); render(); },
+    'm-season': function (t) { state.modal.form.season = parseInt(t.value, 10); state.modal.form.current = false; render(); },
+    'm-current': function (t) { state.modal.form.current = t.checked; },
+    'm-rewatch': function (t) { state.modal.form.rewatch = t.checked; },
     'pf-file': function (t) {
       var m = state.modal; if (!m) return;
       var file = t.files && t.files[0]; if (!file) return;
@@ -1299,11 +1574,7 @@
         if (state.modal !== m) return;
         m.busy = false; m.err = err.message; render();
       });
-    },
-    'stats-year': function (t) { state.ui.statsYear = parseInt(t.value, 10); render(); },
-    'm-season': function (t) { var f = state.modal.form; f.season = parseInt(t.value, 10); f.ep = 1; render(); },
-    'm-ep': function (t) { state.modal.form.ep = parseInt(t.value, 10); },
-    'm-rewatch': function (t) { state.modal.form.rewatch = t.checked; }
+    }
   };
 
   document.addEventListener('click', function (ev) {
@@ -1341,7 +1612,7 @@
     var who = state.user.id || state.user.email;
     if (!force && state.loadedFor === who) { render(); return Promise.resolve(); }
     state.loadedFor = who;
-    return Promise.all([store.listEntries(), store.getGoal(new Date().getFullYear())]).then(function (res) {
+    return Promise.all([store.listEntries(), store.getGoal(CUR_YEAR)]).then(function (res) {
       state.entries = res[0].map(normalizeEntry);
       state.goal = res[1];
       state.ready = true;
@@ -1350,6 +1621,10 @@
       }
       state.route = parseRoute();
       render();
+      // Séries enregistrées avec l'ancien suivi épisode par épisode : on enregistre la conversion en saisons
+      state.entries.filter(function (e) { return e._migrated; }).reduce(function (p, e) {
+        return p.then(function () { return persist(e).catch(function () {}); });
+      }, Promise.resolve()).then(function () { render(); });
     }).catch(function (err) {
       state.ready = true;
       state.loadedFor = null;
@@ -1372,6 +1647,7 @@
         render();
         return;
       }
+      if (event === 'USER_UPDATED') { render(); return; }
       loadData();
     });
     return loadData();

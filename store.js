@@ -8,7 +8,7 @@
   'use strict';
 
   var cfg = window.SEQUENCE_CONFIG || {};
-  var LS_KEY = 'sequence-demo-v1';
+  var LS_KEY = 'sequence-demo-v2';
 
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function uid() {
@@ -66,7 +66,14 @@
       this.mem = window.SEQUENCE_DEMO.seed();
       writeLS(this.mem);
       return Promise.resolve();
-    }
+    },
+    updateEmail: function () { return Promise.reject(new Error('Pas de compte en mode démo.')); },
+    deleteAll: function () {
+      this.mem = { entries: [], goals: {} };
+      writeLS(this.mem);
+      return Promise.resolve();
+    },
+    deleteAccount: function () { return Promise.reject(new Error('Pas de compte en mode démo.')); }
   };
 
   var COLS = ['tmdb_id', 'media_type', 'title', 'year', 'poster_path', 'runtime', 'ep_runtime', 'genres',
@@ -133,6 +140,21 @@
       return this.client.from('goals')
         .upsert({ user_id: this.user.id, year: year, target: target }, { onConflict: 'user_id,year' })
         .then(check);
+    },
+    updateEmail: function (email) {
+      return this.client.auth.updateUser({ email: email }, { emailRedirectTo: this.redirectUrl() }).then(check);
+    },
+    deleteAll: function () {
+      var uidv = this.user.id;
+      return Promise.all([
+        this.client.from('entries').delete().eq('user_id', uidv).then(check),
+        this.client.from('goals').delete().eq('user_id', uidv).then(check)
+      ]);
+    },
+    // Nécessite la fonction delete_user() créée par supprimer-compte.sql
+    deleteAccount: function () {
+      var self = this;
+      return self.client.rpc('delete_user').then(check).then(function () { return self.client.auth.signOut(); });
     }
   };
 
