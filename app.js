@@ -78,6 +78,23 @@
   function plural(n, one, many) { return n + ' ' + (n > 1 ? many : one); }
   var CUR_YEAR = new Date().getFullYear();
 
+  /* ---------- Lien vers Paragraphe (le même journal, pour les livres) ---------- */
+  var PARAGRAPHE_URL = String((window.SEQUENCE_CONFIG || {}).PARAGRAPHE_URL || '').trim();
+  var PARA_LOGO = '<svg class="para__logo" viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" fill="#22253A"></rect>' +
+    '<text x="24" y="35" text-anchor="middle" font-family="Georgia, \'Times New Roman\', serif" font-size="32" fill="#D9B98C">¶</text></svg>';
+  function paraHref() { return /^https?:\/\//.test(PARAGRAPHE_URL) ? PARAGRAPHE_URL : ''; }
+  function paraLink(inner, cls) {
+    var h = paraHref();
+    if (h) return '<a class="' + cls + '" href="' + esc(h) + '" target="_blank" rel="noopener">' + inner + '</a>';
+    if (store.demo) return '<button type="button" class="' + cls + '" data-act="para-demo">' + inner + '</button>';
+    return '';
+  }
+  function paraCard() {
+    return paraLink(PARA_LOGO + '<span class="para__text"><span class="label">Et pour tes livres ?</span>' +
+      '<span class="para__title">Paragraphe</span><span>Le même journal, pour noter et suivre tes lectures.</span></span>' +
+      '<span class="para__go" aria-hidden="true">↗</span>', 'para');
+  }
+
   /* ---------- Dates de visionnage ---------- */
   function recYear(r) {
     if (!r) return null;
@@ -271,7 +288,7 @@
 
   function footer() {
     return '<footer class="foot"><div class="wrap">' +
-      '<span>.SÉQUENCE — ton journal privé de films et de séries</span>' +
+      '<span>.SÉQUENCE — ton journal privé de films et de séries' + (paraHref() ? ' · <a class="link" href="' + esc(paraHref()) + '" target="_blank" rel="noopener">Pour les livres : Paragraphe ↗</a>' : '') + '</span>' +
       '<span>' + TMDB.creditHTML() + '</span>' +
       '</div></footer>';
   }
@@ -348,7 +365,7 @@
     if (!es.length) {
       return '<div class="stack">' + hero + '<div class="empty"><span class="h2 display">.Ton journal est vide</span>' +
         '<p style="margin:0;max-width:60ch">Commence par le dernier film ou la dernière série que tu as regardés. Tu pourras les noter et suivre tes saisons.</p>' +
-        '<button type="button" class="btn btn--accent" data-act="open-add">J\'ai vu…</button></div>' + helpBlock + '</div>';
+        '<button type="button" class="btn btn--accent" data-act="open-add">J\'ai vu…</button></div>' + helpBlock + paraCard() + '</div>';
     }
 
     var enCours = es.filter(function (e) { return e.status === 'en_cours'; })
@@ -396,7 +413,7 @@
       '<form class="tonight" data-form="tonight"><span class="display">Ce soir j\'ai…</span>' +
       '<label for="tonight-min"><input id="tonight-min" type="number" min="20" max="400" step="5" value="' + state.ui.tonightMin + '"> minutes devant moi</label>' +
       '<span><button type="submit" class="btn btn--small">Suggère-moi un film</button></span>' + tonightRes + '</form></section>' +
-      helpBlock + '</div>';
+      helpBlock + paraCard() + '</div>';
   }
 
   /* ---------- Vidéothèque ---------- */
@@ -1157,6 +1174,9 @@
       '<form data-form="acc-clear" novalidate><div class="field"><label class="label" for="acc-clear">Tape VIDER pour confirmer</label><input id="acc-clear" type="text" autocomplete="off"></div>' +
       '<span><button type="submit" class="btn btn--small">Vider mon journal</button></span></form>' + accMsg('clear') + '</section>';
 
+    var pc = paraCard();
+    if (pc) h += '<section class="panel"><h2 class="h3 display">.Tu veux la même chose pour les livres ?</h2>' + pc + '</section>';
+
     if (!demo) {
       h += '<section class="panel panel--danger"><h2 class="h3 display">.Supprimer mon compte</h2><p class="note">Supprime ton compte et toutes tes données. C\'est définitif et immédiat.</p>' +
         '<form data-form="acc-delete" novalidate><div class="field"><label class="label" for="acc-delete">Tape SUPPRIMER pour confirmer</label><input id="acc-delete" type="text" autocomplete="off"></div>' +
@@ -1497,6 +1517,7 @@
       accSet('export', 'Fichier tableur téléchargé. Il s\'ouvre avec Excel, Numbers ou Google Sheets.');
     },
     'auth-mode': function (t) { state.ui.auth = { mode: t.dataset.v, msg: '', err: '', busy: false }; render(); },
+    'para-demo': function () { toast('Lien vers Paragraphe : ajoute PARAGRAPHE_URL dans config.js'); },
     'auth-tab': function (t) { state.ui.auth.tab = t.dataset.v; state.ui.auth.err = ''; render(); }
   };
 
